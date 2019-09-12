@@ -1,12 +1,16 @@
 package scuffed6502
 
-class Bus(private val devices: MutableList<IDevice> = mutableListOf()) {
+class Bus(val devices: MutableList<IDevice> = mutableListOf()) {
 
-    fun connectDevice(device: IDevice) = this.devices.add(device)
+    fun connectDevice(device: IDevice){
+        this.devices.add(device)
+    }
 
-    fun disconnectDevice(device: IDevice) = this.devices.remove(device)
+    fun disconnectDevice(device: IDevice){
+        this.devices.remove(device)
+    }
 
-    fun readFromRAM(addr: UShort) = getRAM()?.read(addr)
+    fun readFromRAM(addr: UShort) = getRAM().read(addr)
 
     fun writeToRAM(addr: UShort, data: UByte): Boolean {
         val ram = getRAM() ?: return false
@@ -14,6 +18,6 @@ class Bus(private val devices: MutableList<IDevice> = mutableListOf()) {
         return true
     }
 
-    private fun getRAM() = this.devices.filterIsInstance<RAM>().firstOrNull()
+    private fun getRAM() = this.devices.filterIsInstance<Ram>().first()
 
 }

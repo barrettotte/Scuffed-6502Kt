@@ -1,11 +1,14 @@
 package scuffed6502
 
+@ExperimentalUnsignedTypes
 interface IDevice {
 
     fun write(addr: UShort, data: UByte): Boolean
 
-    fun read(addr: UShort): UByte?
+    fun read(addr: UShort): UByte
 
-    fun connectToBus(bus: Bus)
+    fun connectBus(bus: Bus)
+
+    fun disconnectBus()
 
 }

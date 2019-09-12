@@ -1,13 +1,18 @@
 package scuffed6502
 
-import java.lang.Exception
-
+@ExperimentalUnsignedTypes
 class Ram(private val storage: UByteArray = UByteArray(65536) {0U}) : IDevice {
 
-    private lateinit var bus: Bus
+    private var bus: Bus? = null
 
-    override fun connectToBus(bus: Bus){
+    override fun connectBus(bus: Bus){
+        bus.connectDevice(this)
         this.bus = bus
+    }
+
+    override fun disconnectBus() {
+        bus?.disconnectDevice(this)
+        this.bus = null
     }
 
     override fun write(addr: UShort, data: UByte): Boolean {
