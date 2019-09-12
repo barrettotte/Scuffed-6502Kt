@@ -22,7 +22,6 @@ class Cpu: IDevice{
         companion object{ fun getMask(obj: FLAGS): UByte = (1U shl(obj.bit)).toUByte() }
     } // is this necessary?
 
-
     private var bus: Bus? = null
     private var regAcc: UByte = 0u
     private var regX: UByte = 0u
@@ -30,36 +29,12 @@ class Cpu: IDevice{
     private var stkPtr: UByte = 0u
     private var pc: UShort = 0u
     private var regStatus: UByte = 0u
-
     private var fetched: UByte = 0u
-
     private var addrAbs: UShort = 0u
-
-    // In the 6502, branching can only occur within a certain distance of originating call
-    private var addrRel: UShort = 0u
-
+    private var addrRel: UShort = 0u // In 6502, branch within a certain distance of originating call
     private var opcode: UByte = 0u
     private var cycles: UByte = 0u
-
-
-    // list of 256 instructions
     var instructions: List<Instruction>
-
-
-
-    override fun connectBus(bus: Bus){
-        bus.connectDevice(this)
-        this.bus = bus
-    }
-
-    override fun disconnectBus() {
-        bus?.disconnectDevice(this)
-        this.bus = null
-    }
-
-    override fun read(addr: UShort): UByte = this.bus?.readFromRAM(addr) ?: 0U
-
-    override fun write(addr: UShort, data: UByte): Boolean = this.bus?.writeToRAM(addr, data) ?: false
 
 
     // Access status register
@@ -142,6 +117,20 @@ class Cpu: IDevice{
     init {
         instructions = jacksonObjectMapper().readValue(javaClass.classLoader.getResource("Cpu.json").readText())
     }
+
+    override fun connectBus(bus: Bus){
+        bus.connectDevice(this)
+        this.bus = bus
+    }
+
+    override fun disconnectBus() {
+        bus?.disconnectDevice(this)
+        this.bus = null
+    }
+
+    override fun read(addr: UShort): UByte = this.bus?.readFromRAM(addr) ?: 0U
+
+    override fun write(addr: UShort, data: UByte): Boolean = this.bus?.writeToRAM(addr, data) ?: false
 
     fun tickClock(){
         if(cycles.toUInt() == 0U){
@@ -261,6 +250,8 @@ class Cpu: IDevice{
     }
 
 }
+
+// Extension Methods
 
 private infix fun UShort.shl(i: Int): UShort = ((this.toInt()) shl i).toUShort()
 
