@@ -71,7 +71,7 @@ class Cpu(val bus: Bus): IDevice {
 
     private fun log(){
         logData.add(mapOf(
-                "PC" to "%04x".format(pc.toInt()).toUpperCase(),
+                "PC" to "%04x".format(if(logData.size > 0) pc.toInt() else 0x8000U.toInt()).toUpperCase(),
                 "OPCODE" to instructions[opcode.toInt()].mnemonic,
                 "ACC" to "%02x".format(regAcc.toInt()).toUpperCase(),
                 "X" to "%02x".format(regX.toInt()).toUpperCase(),
