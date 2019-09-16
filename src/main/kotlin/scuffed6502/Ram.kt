@@ -25,4 +25,10 @@ class Ram(val bus: Bus, private val storage: UByteArray = UByteArray(65536) {0U}
         var idx = 0
         storage.forEach { b -> println("%04x: ".format(idx++).toUpperCase() + "%02x".format(b.toInt()).toUpperCase()) }
     }
+
+    fun reset(){
+        storage.forEachIndexed { index, uByte ->
+            storage[index] = 0U
+        }
+    }
 }

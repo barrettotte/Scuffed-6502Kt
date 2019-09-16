@@ -14,7 +14,7 @@ class Cpu(val bus: Bus): IDevice {
     var regStatus: UByte = 0U
     private var fetched: UByte = 0U
     private var addrAbs: UShort = 0U
-    private var addrRel: UShort = 0U // In 6502, branch within a certain distance of originating call
+    private var addrRel: UShort = 0U // Branch within a certain distance of originating call
     private var opcode: UByte = 0U
     private var cycles: UByte = 0U
 
@@ -56,22 +56,21 @@ class Cpu(val bus: Bus): IDevice {
     fun complete() = cycles == 0U.toUByte()
 
     fun tickClock(){
-        if(cycles.toUInt() == 0U){
-            val lookup = opcode.toInt()
-            opcode = read(pc++)
+        if(cycles == 0U.toUByte()){
+            opcode = read(pc)
             setFlag("U", true)
-            cycles = instructions[lookup].cycles.toUByte()
-            val moreClock1 = addressModeHandler(instructions[lookup].addrMode)
-            val moreClock2 = instructionHandler(instructions[lookup].impl)
-            cycles = (cycles + moreClock1.and(moreClock2)).toUByte()
+            pc++
+            cycles = instructions[opcode.toInt()].cycles.toUByte()
+            val moreClock1 = addressModeHandler(instructions[opcode.toInt()].addrMode)
+            val moreClock2 = instructionHandler(instructions[opcode.toInt()].impl)
+            cycles = (cycles + (moreClock1 and moreClock2).toUByte()).toUByte()
+            setFlag("U", true)
         }
         cycles--
     }
 
     private fun log(){
         logData.add(mapOf(
-                //"DISASSEMBLY" to disassemble((addrAbs- 1u).toUShort(), addrAbs).toString(),
-                "ADDR" to "%04x".format(addrAbs.toInt()).toUpperCase(),
                 "PC" to "%04x".format(pc.toInt()).toUpperCase(),
                 "OPCODE" to instructions[opcode.toInt()].mnemonic,
                 "ACC" to "%02x".format(regAcc.toInt()).toUpperCase(),
@@ -92,22 +91,17 @@ class Cpu(val bus: Bus): IDevice {
         var hi: UByte
         var disassembled: MutableMap<UShort, String> = mutableMapOf()
         var lineAddr: UShort
-
         var i = 0 //start
-        //println("$addr to $end")
 
         while(i.toUInt() <= end.toUInt()){//addr <= end){
             lineAddr = addr
             var instruction = "$%02x".format(addr.toInt()) + ": "
             val opcode = read(addr.toUShort())
-
             addr++
             i++
 
             val addrMode = instructions[opcode.toInt()].addrMode
-            //println("$addr : $addrMode")
             instruction += instructions[opcode.toInt()].mnemonic + " "
-
             when (addrMode) {
                 "IMP" -> instruction += " {IMP}"
                 "IMM" -> {
@@ -176,13 +170,11 @@ class Cpu(val bus: Bus): IDevice {
             }
             disassembled[lineAddr] = instruction
         }
-        print(log())
         return disassembled
     }
 
     private fun fetch(): UByte {
-        val lookup = opcode.toInt()
-        if(instructions[lookup].addrMode == "IMP"){
+        if(instructions[opcode.toInt()].addrMode != "IMP"){
             fetched = read(addrAbs)
         }
         return fetched
@@ -216,11 +208,8 @@ class Cpu(val bus: Bus): IDevice {
             else  -> insXXX()
         }
         val m = instructions[opcode.toInt()].mnemonic
-        if (m != "???"){
-            println("Running instruction $m - PC = $pc")
-            if(m != "BRK"){
-                print("WTF")
-            }
+        if(pc.toInt() > 10) {
+            //println("executing instruction $m")
         }
         log()
         return result
@@ -234,10 +223,9 @@ class Cpu(val bus: Bus): IDevice {
     // Reset CPU state. Jumps to value at location 0xFFFC at compile
     fun reset(){
         addrAbs = 0xFFFCU
-        val lo = read(addrAbs.plus(0U).toUShort()).toUShort()
-        val hi = read(addrAbs.plus(1U).toUShort()).toUShort()
+        val lo = read((addrAbs + 0U).toUShort()).toUShort()
+        val hi = read((addrAbs + 1U).toUShort()).toUShort()
         pc = (hi shl 8) or lo
-
         regAcc = 0U
         regX = 0U
         regY = 0U
@@ -253,15 +241,15 @@ class Cpu(val bus: Bus): IDevice {
     // Execute instruction at location 0xFFFE
     fun interruptReq(){
         if(!getFlag("I")){
-            write((0x0100U + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU).toUByte())
+            write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
             stkPtr--
-            write((0x0100U + stkPtr).toUShort(), (pc and 0x00FFU).toUByte())
+            write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
             stkPtr--
 
             setFlag("B", false)
             setFlag("U", true)
             setFlag("I", true)
-            write((0x0100U + stkPtr).toUShort(), regStatus)
+            write((0x0100U.toUShort() + stkPtr).toUShort(), regStatus)
             stkPtr--
 
             addrAbs = 0xFFFEU
@@ -275,15 +263,15 @@ class Cpu(val bus: Bus): IDevice {
 
     // Execute instruction at location 0xFFFA, cannot be disabled
     fun nmInterruptReq(){
-        write((0x0100U + stkPtr).toUShort(), ((pc ushr 8) and 0x00FF.toUShort()).toUByte())
+        write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FF.toUShort()).toUByte())
         stkPtr--
-        write((0x0100U + stkPtr).toUShort(), (pc and 0x00FF.toUShort()).toUByte())
+        write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FF.toUShort()).toUByte())
         stkPtr--
 
         setFlag("B", false)
         setFlag("U", true)
         setFlag("I", true)
-        write((0x0100U + stkPtr).toUShort(), regStatus)
+        write((0x0100U.toUByte() + stkPtr).toUShort(), regStatus)
         stkPtr--
 
         addrAbs = 0xFFFAU
@@ -311,34 +299,36 @@ class Cpu(val bus: Bus): IDevice {
 
     // Zero Page -> Address location absolutely using only first 256 bytes of memory (1 byte address)
     private fun addrZP0(): UByte {
-        addrAbs = read(pc++).toUShort().and(0x00FFU)
+        addrAbs = read(pc++).toUShort().and(0x00FFU.toUShort())
         return 0U
     }
 
     // Zero Page X -> Zero page addressing plus X register value as offset
     private fun addrZPX(): UByte {
-        addrAbs = read(pc++).plus(regX).toUShort().and(0x00FFU)
+        addrAbs = read(pc++).plus(regX).toUShort().and(0x00FFU.toUShort())
         return 0U
     }
 
     // Zero Page Y -> Zero page addressing plus Y register value as offset
     private fun addrZPY(): UByte {
-        addrAbs = read(pc++).plus(regX).toUShort().and(0x00FFU)
+        addrAbs = read(pc++).plus(regY).toUShort().and(0x00FFU.toUShort())
         return 0U
     }
 
     // Relative -> Address to branch from must be within 1byte relative offset (branch instructions)
     private fun addrREL(): UByte {
         addrRel = read(pc++).toUShort()
-        if(addrRel.and(0x80U) == 1U.toUShort()){
-            addrRel = addrRel.or(0xFF00U)
+        if(addrRel.and(0x80U.toUShort()) == 1U.toUShort()){
+            addrRel = addrRel.or(0xFF00U.toUShort())
         }
         return 0U
     }
 
     // Absolute -> Address using full 2 byte address
     private fun addrABS(): UByte {
-        addrAbs = (read(pc++).toUShort() shl 8).or(read(pc++).toUShort())
+        val lo = read(pc++).toUShort()
+        val hi = read(pc++).toUShort()
+        addrAbs = (hi shl 8) or lo
         return 0U
     }
 
@@ -347,7 +337,7 @@ class Cpu(val bus: Bus): IDevice {
         val lo = read(pc++).toUShort()
         val hi = read(pc++).toUShort()
         addrAbs = (hi shl 8).or(lo).plus(regX).toUShort()
-        return if (addrAbs.and(0xFF00U) != (hi shl 8)) 1U else 0U
+        return if (addrAbs.and(0xFF00U.toUShort()) != (hi shl 8)) 1U else 0U
     }
 
     // Absolute Y -> absolute addressing with y register value as offset
@@ -355,7 +345,7 @@ class Cpu(val bus: Bus): IDevice {
         val lo = read(pc++).toUShort()
         val hi = read(pc++).toUShort()
         addrAbs = (hi shl 8).or(lo).plus(regY).toUShort()
-        return if (addrAbs.and(0xFF00U) != (hi shl 8)) 1U else 0U
+        return if (addrAbs.and(0xFF00U.toUShort()) != (hi shl 8)) 1U else 0U
     }
 
     // Indirect -> use 2 byte address to get actual 2 byte address
@@ -364,7 +354,7 @@ class Cpu(val bus: Bus): IDevice {
         val hi = read(pc++).toUShort()
         val ptr = (hi shl 8).or(lo)
         addrAbs = if(lo == 0x00FF.toUShort()){ // simulate page boundary hardware bug
-            (read((ptr.and(0xFF00U)) shl 8)).or(read(ptr)).toUShort()
+            (read((ptr.and(0xFF00U.toUShort())) shl 8)).or(read(ptr)).toUShort()
         } else {
             (read(((ptr.plus(1U)) shl 8).toUShort())).or(read(ptr)).toUShort()
         }
@@ -374,8 +364,8 @@ class Cpu(val bus: Bus): IDevice {
     // Indirect X -> use 1 byte address plus x register value as offset for address on zero page
     private fun addrIZX(): UByte {
         val t = read(pc++).toUShort()
-        val lo = read(t.plus(regX).and(0x00FFU).toUShort()).toUShort()
-        val hi = read(t.plus(regX).plus(1U).and(0x00FFU).toUShort()).toUShort()
+        val lo = read((t + regX).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
+        val hi = read((t + regX + 1U).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
         addrAbs = (hi shl 8).or(lo)
         return 0U
     }
@@ -383,10 +373,10 @@ class Cpu(val bus: Bus): IDevice {
     // Indirect Y -> use 1 byte address plus y register value as offset for address on zero page
     private fun addrIZY(): UByte {
         val t = read(pc++).toUShort()
-        val lo = read(t.and(0x00FFU)).toUShort()
-        val hi = read(t.plus(1U).and(0x00FFU).toUShort()).toUShort()
+        val lo = read(t.and(0x00FFU.toUShort())).toUShort()
+        val hi = read((t + 1U).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
         addrAbs = (hi shl 8).or(lo).plus(regY).toUShort()
-        return if(addrAbs.and(0xFF00U) == (hi shl 8)) 1U else 0U
+        return if((addrAbs and(0xFF00U.toUShort())) == (hi shl 8)) 1U else 0U
     }
 
 
@@ -397,9 +387,10 @@ class Cpu(val bus: Bus): IDevice {
         if(condition) {
             cycles++
             addrAbs = (pc + addrRel).toUShort()
-            if ((addrAbs and 0xFF00U) != (pc and 0xFF00U)) {
+            if ((addrAbs and 0xFF00U.toUShort()).toUShort() != (pc and 0xFF00U.toUShort()).toUShort()) {
                 cycles++
             }
+            println("!!!!!!!!! $addrAbs, $pc")
             pc = addrAbs
         }
         return 0U
@@ -415,22 +406,22 @@ class Cpu(val bus: Bus): IDevice {
         val regUShort = reg.toUShort()
         val tmp = (regUShort - fetched.toUShort()).toUShort()
         setFlag("C", regUShort >= fetched)
-        setFlag("Z", (tmp and 0x00FFU) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U).equalsInt(1))
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
+        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
         return 0U
     }
 
     private fun incrementRegister(reg: UByte, value: Int): UByte{
-        val regNew = (if(value > 0) reg.plus(value.toUInt()) else reg.minus(value.toUInt())).toUByte()
+        val regNew = (if(value > 0) (reg + value.toUByte()) else (reg - value.toUByte())).toUByte()
         setFlag("Z", regNew == 0x00.toUByte())
-        setFlag("N", (regNew and 0x80U).equalsInt(1))
+        setFlag("N", (regNew and 0x80U.toUByte()).equalsInt(1))
         return regNew
     }
 
     private fun loadRegister(): UByte{
         fetch()
         setFlag("Z", fetched == 0x00.toUByte())
-        setFlag("N", (fetched and 0x80U).equalsInt(1))
+        setFlag("N", (fetched and 0x80U.toUByte()).equalsInt(1))
         return fetched
     }
 
@@ -443,10 +434,10 @@ class Cpu(val bus: Bus): IDevice {
         fetch()
         val tmp = (regAcc.toUShort() + fetched.toUShort() + getFlag("C").toUShort()).toUShort()
         setFlag("C", tmp > 255U)
-        setFlag("Z", (tmp and 0x00FFU).equalsInt(0))
-        setFlag("N", (tmp and 0x80U).equalsInt(1))
-        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U).equalsInt(1))
-        regAcc = (tmp and 0x00FFU).toUByte()
+        setFlag("Z", (tmp and 0x00FFU.toUShort()).equalsInt(0))
+        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
+        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U.toUShort()).equalsInt(1))
+        regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         return 1U
     }
 
@@ -455,7 +446,7 @@ class Cpu(val bus: Bus): IDevice {
         fetch()
         regAcc = regAcc and fetched
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 1U
     }
 
@@ -463,13 +454,13 @@ class Cpu(val bus: Bus): IDevice {
     private fun insASL(): UByte {
         fetch()
         val tmp = (fetched.toUShort() shl 1)
-        setFlag("C", (tmp and 0xFF00U) > 0U)
-        setFlag("Z", (tmp and 0x00FFU) == 0x00.toUShort())
-        setFlag("N", (tmp and 0x80U).equalsInt(1))
+        setFlag("C", (tmp and 0xFF00U.toUShort()) > 0U)
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
+        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
         if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU).toUByte()
+            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         } else {
-            write(addrAbs, (tmp and 0x00FFU).toUByte())
+            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
         }
         return 0U
     }
@@ -487,7 +478,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insBIT(): UByte {
         fetch()
         val tmp = (regAcc and fetched).toUShort()
-        setFlag("Z", (tmp and 0x00FFU) == 0x00.toUShort())
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
         setFlag("N", (fetched and ((1U shl 7).toUByte())).equalsInt(1))
         setFlag("V", (fetched and ((1U shl 6).toUByte())).equalsInt(1))
         return 0U
@@ -505,18 +496,18 @@ class Cpu(val bus: Bus): IDevice {
     // Program sourced interrupt
     private fun insBRK(): UByte {
         pc++
-        /*setFlag("I", true)
-        write((0x0100U + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU).toUByte())
+        setFlag("I", true)
+        write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
         stkPtr--
-        write((0x0100U + stkPtr).toUShort(), (pc and 0x00FFU).toUByte())
+        write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
         stkPtr--
 
         setFlag("B", true)
-        write((0x0100U + stkPtr).toUShort(), regStatus)
+        write((0x0100U.toUByte() + stkPtr).toUShort(), regStatus)
         stkPtr--
         setFlag("B", false)
-        pc = (read(0xFFFEU).toUShort() or ((read(0xFFFFU).toUShort() shl 8).toUByte()).toUShort())
-        */
+        pc = (read(0xFFFEU.toUShort()).toUShort() or ((read(0xFFFFU.toUShort()).toUShort() shl 8).toUByte()).toUShort())
+
         return 0U
     }
 
@@ -551,8 +542,8 @@ class Cpu(val bus: Bus): IDevice {
     private fun insDEC(): UByte {
         fetch()
         val tmp = (fetched - 1U).toUShort()
-        write(addrAbs, (tmp and 0x00FFU).toUByte())
-        setFlag("Z", (tmp and 0x00FFU) == 0x0000.toUShort())
+        write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
         return 0U
     }
 
@@ -573,7 +564,7 @@ class Cpu(val bus: Bus): IDevice {
         fetch()
         regAcc = regAcc xor fetched
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 1U
     }
 
@@ -581,9 +572,9 @@ class Cpu(val bus: Bus): IDevice {
     private fun insINC(): UByte {
         fetch()
         val tmp = (fetched + 1U).toUShort()
-        write(addrAbs, (tmp and 0x00FFU).toUByte())
-        setFlag("Z", (tmp and 0x00FFU) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U).equalsInt(1))
+        write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
+        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
         return 0U
     }
 
@@ -608,9 +599,9 @@ class Cpu(val bus: Bus): IDevice {
     // Jump to subroutine
     private fun insJSR(): UByte {
         pc--
-        write((0x0100U + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU).toUByte())
+        write((0x0100U.toUShort() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
         stkPtr--
-        write((0x0100U + stkPtr).toUShort(), (pc and 0x00FFU).toUByte())
+        write((0x0100U.toUShort() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
         stkPtr--
         pc = addrAbs
         return 0U
@@ -637,13 +628,13 @@ class Cpu(val bus: Bus): IDevice {
     // Logical Shift Right
     private fun insLSR(): UByte {
         fetch()
-        setFlag("C", (fetched and 0x0001U).equalsInt(1))
+        setFlag("C", (fetched and 0x0001U.toUByte()).equalsInt(1))
         val tmp = (fetched ushr 1).toUShort()
-        setFlag("Z", (tmp and 0x00FFU).toUShort() == 0x0000.toUShort())
+        setFlag("Z", (tmp and 0x00FFU.toUShort()).toUShort() == 0x0000.toUShort())
         if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU).toUByte()
+            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         } else {
-            write(addrAbs, (tmp and 0x00FFU).toUByte())
+            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
         }
         return 0U
     }
@@ -666,13 +657,13 @@ class Cpu(val bus: Bus): IDevice {
         fetch()
         regAcc = regAcc or fetched
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 1U
     }
 
     // Push accumulator to stack
     private fun insPHA(): UByte {
-        write((0x0100U + stkPtr).toUShort(), regAcc)
+        write((0x0100U.toUShort() + stkPtr).toUShort(), regAcc)
         stkPtr--
         return 0U
     }
@@ -680,7 +671,7 @@ class Cpu(val bus: Bus): IDevice {
     // Push status register to stack
     private fun insPHP(): UByte {
         stkPtr++
-        regStatus = read((0x0100U + stkPtr).toUShort())
+        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
         setFlag("U", true)
         return 0U
     }
@@ -688,16 +679,16 @@ class Cpu(val bus: Bus): IDevice {
     // Pop accumulator off stack
     private fun insPLA(): UByte {
         stkPtr++
-        regAcc = read((0x0100U + stkPtr).toUShort())
+        regAcc = read((0x0100U.toUByte() + stkPtr).toUShort())
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 
     // Pop status register off stack
     private fun insPLP(): UByte {
         stkPtr++
-        regStatus = read((0x0100U + stkPtr).toUShort())
+        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
         setFlag("U", true)
         return 0U
     }
@@ -706,13 +697,13 @@ class Cpu(val bus: Bus): IDevice {
     private fun insROL(): UByte {
         fetch()
         val tmp = (fetched shl 1).toUShort() or getFlag("C").toUShort()
-        setFlag("C", (tmp and 0xFF00U).equalsInt(1))
-        setFlag("Z", (tmp and 0x00FFU) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U).equalsInt(1))
+        setFlag("C", (tmp and 0xFF00U.toUShort()).equalsInt(1))
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
+        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
         if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU).toUByte()
+            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         } else {
-            write(addrAbs, (tmp and 0x00FFU).toUByte())
+            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
         }
         return 0U
     }
@@ -721,13 +712,13 @@ class Cpu(val bus: Bus): IDevice {
     private fun insROR(): UByte {
         fetch()
         val tmp = (getFlag("C").toUByte() shl 7).toUShort() or ((fetched ushr 1).toUShort())
-        setFlag("C", (fetched and 0x01U).equalsInt(1))
-        setFlag("Z", (tmp and 0x00FFU) == 0x00.toUShort())
-        setFlag("N", (tmp and 0x0080U).equalsInt(1))
+        setFlag("C", (fetched and 0x01U.toUByte()).equalsInt(1))
+        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
+        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
         if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU).toUByte()
+            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         } else {
-            write(addrAbs, (tmp and 0x00FFU).toUByte())
+            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
         }
         return 0U
     }
@@ -735,23 +726,23 @@ class Cpu(val bus: Bus): IDevice {
     // Return from interrupt
     private fun insRTI(): UByte {
         stkPtr++
-        regStatus = read((0x0100U + stkPtr).toUShort())
+        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
         regStatus = regStatus and getFlag("B").toUByte().inv()
         regStatus = regStatus and getFlag("U").toUByte().inv()
 
         stkPtr++
-        pc = read((0x0100U + stkPtr).toUShort()).toUShort()
+        pc = read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort()
         stkPtr++
-        pc = pc or (read((0x0100U + stkPtr).toUShort()).toUShort() shl 8)
+        pc = pc or (read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort() shl 8)
         return 0U
     }
 
     // Return from subroutine
     private fun insRTS(): UByte {
         stkPtr++
-        pc = read((0x0100U + stkPtr).toUShort()).toUShort()
+        pc = read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort()
         stkPtr++
-        pc = pc or (read((0x0100U + stkPtr).toUShort()).toUShort() shl 8)
+        pc = pc or (read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort() shl 8)
         pc++
         return 0U
     }
@@ -759,13 +750,13 @@ class Cpu(val bus: Bus): IDevice {
     // Subtract with borrow in
     private fun insSBC(): UByte {
         fetch()
-        val value = fetched.toUShort() xor 0x00FFU
+        val value = fetched.toUShort() xor 0x00FFU.toUShort()
         val tmp = (regAcc.toUShort() + value + getFlag("C").toUShort()).toUShort()
         setFlag("C", tmp > 255U)
-        setFlag("Z", (tmp and 0x00FFU).equalsInt(0))
-        setFlag("N", (tmp and 0x80U).equalsInt(1))
-        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U).equalsInt(1))
-        regAcc = (tmp and 0x00FFU).toUByte()
+        setFlag("Z", (tmp and 0x00FFU.toUShort()).equalsInt(0))
+        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
+        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U.toUShort()).equalsInt(1))
+        regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
         return 1U
     }
 
@@ -791,7 +782,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insTAX(): UByte {
         regX = regAcc
         setFlag("Z", regX == 0x00.toUByte())
-        setFlag("N", (regX and 0x80U).equalsInt(1))
+        setFlag("N", (regX and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 
@@ -799,7 +790,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insTAY(): UByte {
         regY = regAcc
         setFlag("Z", regY == 0x00.toUByte())
-        setFlag("N", (regY and 0x80U).equalsInt(1))
+        setFlag("N", (regY and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 
@@ -807,7 +798,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insTSX(): UByte {
         regX = stkPtr
         setFlag("Z", regX == 0x00.toUByte())
-        setFlag("N", (regY and 0x80U).equalsInt(1))
+        setFlag("N", (regY and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 
@@ -815,7 +806,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insTXA(): UByte {
         regAcc = regX
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 
@@ -829,7 +820,7 @@ class Cpu(val bus: Bus): IDevice {
     private fun insTYA(): UByte {
         regAcc = regY
         setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U).equalsInt(1))
+        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
         return 0U
     }
 

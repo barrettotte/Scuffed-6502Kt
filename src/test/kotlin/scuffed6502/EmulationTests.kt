@@ -17,6 +17,8 @@ class BasicTest {
     fun setup(){
         bus.connectDevice(cpu)
         bus.connectDevice(ram)
+        ram.reset()
+        cpu.reset()
     }
 
     @AfterEach
@@ -94,7 +96,6 @@ class BasicTest {
         writeMemory("./disassembly-01.txt", memory)
 
         assertEquals("\$8000: LDX #\$0a {IMM}", memory[32768U])
-        cpu.reset()
     }
 
     @Test
@@ -106,12 +107,14 @@ class BasicTest {
         )
         val offset = 0x8000.toUShort()
         objCode.forEach { _ ->
-            ram.write((offset+objIdx.toUInt()).toUShort(), objCode[objIdx++])
+            ram.write((offset+objIdx.toUInt()).toUShort(), objCode[objIdx])
+            objIdx++
         }
         ram.write(0xFFFCU, 0x00U)
         ram.write(0xFFFDU, 0x80U)
+        cpu.reset()
 
-        var idx = 0x0000U
+        var idx = 0U
         while(idx < 0xFFFFU){
             do {
                 cpu.tickClock()
@@ -124,7 +127,6 @@ class BasicTest {
                 out.println(entry.toString())
             }
         }
-        cpu.reset()
     }
 
     private fun writeMemory(path: String, memory: Map<UShort, String>){
@@ -134,7 +136,5 @@ class BasicTest {
             }
         }
     }
-
-
 
 }
