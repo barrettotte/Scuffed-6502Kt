@@ -1,18 +1,14 @@
 package scuffed6502
 
 @ExperimentalUnsignedTypes
-class Ram(private val storage: UByteArray = UByteArray(65536) {0U}) : IDevice {
-
-    private var bus: Bus? = null
+class Ram(val bus: Bus, private val storage: UByteArray = UByteArray(65536) {0U}) : IDevice {
 
     override fun connectBus(bus: Bus){
         bus.connectDevice(this)
-        this.bus = bus
     }
 
     override fun disconnectBus() {
         bus?.disconnectDevice(this)
-        this.bus = null
     }
 
     override fun write(addr: UShort, data: UByte): Boolean {
@@ -24,4 +20,9 @@ class Ram(private val storage: UByteArray = UByteArray(65536) {0U}) : IDevice {
     }
 
     override fun read(addr: UShort): UByte = this.storage[addr.toInt()]
+
+    fun dump(){
+        var idx = 0
+        storage.forEach { b -> println("%04x: ".format(idx++).toUpperCase() + "%02x".format(b.toInt()).toUpperCase()) }
+    }
 }

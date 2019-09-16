@@ -1,5 +1,6 @@
 package scuffed6502
 
+@ExperimentalUnsignedTypes
 class Bus(val devices: MutableList<IDevice> = mutableListOf()) {
 
     fun connectDevice(device: IDevice){
@@ -13,8 +14,8 @@ class Bus(val devices: MutableList<IDevice> = mutableListOf()) {
     fun readFromRAM(addr: UShort) = getRAM().read(addr)
 
     fun writeToRAM(addr: UShort, data: UByte): Boolean {
-        val ram = getRAM() ?: return false
-        ram?.write(addr, data)
+        val ram = getRAM()
+        ram.write(addr, data)
         return true
     }
 

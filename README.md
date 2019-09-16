@@ -29,6 +29,10 @@ It was a bit lame of me to not go and figure everything out myself, but the ulti
   * kotlin.UShort: an **unsigned 16-bit integer**, ranges from 0 to 65535
   * kotlin.UInt: an unsigned 32-bit integer, ranges from 0 to 2^32 - 1
   * kotlin.ULong: an unsigned 64-bit integer, ranges from 0 to 2^64 - 1
+* Hex literal conversions
+  * 0x80 - 128U
+  * 0x00FF - 255U
+  * 0xFF00 - 65280U
 
 
 ## References
@@ -36,7 +40,9 @@ It was a bit lame of me to not go and figure everything out myself, but the ulti
   * Video https://www.youtube.com/watch?v=8XmxKPJDGU0
   * Repository https://github.com/OneLoneCoder/olcNES
 * Datasheet http://archive.6502.org/datasheets/rockwell_r650x_r651x.pdf
-* http://www.obelisk.me.uk/6502/index.html
+* 6502 Instruction set https://www.masswerk.at/6502/6502_instruction_set.html
+* 6502 Addressing modes http://www.obelisk.me.uk/6502/index.html
+* 6502 Assembler https://www.masswerk.at/6502/assembler.html
 * http://www.6502.org/
   * http://www.6502.org/tutorials/
   * http://www.6502.org/users/andre/65k/af65002/af65002arch.html 
