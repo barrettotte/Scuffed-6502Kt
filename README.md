@@ -16,7 +16,7 @@ It was a bit lame of me to not go and figure everything out myself, but the ulti
 ## Design Choices
 * Honestly a lot of the OOP I did was not needed, but I wanted to get more hands on Kotlin OOP experience in a more fun way
 * I used Kotlin's unsigned numerics to get some free type/range checking out of the box (ex: addr cannot be < 0)
-* I changed the instruction lookup table to be JSON and kotlin metaprogramming driven
+* I changed the instruction lookup table to be JSON driven
 
 
 ## Commands
