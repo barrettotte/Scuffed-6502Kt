@@ -13,6 +13,10 @@ so I followed along in Kotlin and made a couple changes to the design (namely mo
 It was a bit lame of me to not go and figure everything out myself, but the ultimate goal was to learn kotlin and a bit of 6502 architecture
 
 
+Welp, I only accomplished one goal. I feel pretty good about my knowledge of Kotlin now, but my 6502 implementation doesn't work.
+Memory gets disassembled correctly, but I get stuck in a BNE loop in my tests...
+
+
 ## Design Choices
 * Honestly a lot of the OOP I did was not needed, but I wanted to get more hands on Kotlin OOP experience in a more fun way
 * I used Kotlin's unsigned numerics to get some free type/range checking out of the box (ex: addr cannot be < 0)
