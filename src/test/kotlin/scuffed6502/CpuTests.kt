@@ -6,7 +6,6 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 class CpuTests {
-
     private val cpu: Cpu = Cpu()
 
     @BeforeEach
@@ -16,12 +15,12 @@ class CpuTests {
 
     @AfterEach
     fun teardown(){
-        println("\ndone.")
+        //println("\ndone.")
     }
 
     @Test
     fun test_cpu_init(){
-        assertEquals(256, cpu.instructions.size)
+        assertEquals(151, cpu.getInstructionSet().size)
         assertEquals(0, cpu.getStatus())
     }
 

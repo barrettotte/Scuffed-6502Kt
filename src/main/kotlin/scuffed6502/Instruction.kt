@@ -1,9 +1,9 @@
 package scuffed6502
 
 data class Instruction(
-    val id: Int = 0,
     val mnemonic: String = "NOP",
-    val mode: String = "IMM",
-    val size: Int = 0,
-    val cycles: Int = 0
+    val opcode: Int = "EA".toInt(16),
+    val size: Int = 1,
+    val cycles: Int = 2,
+    val mode: String = "IMP"
 )
