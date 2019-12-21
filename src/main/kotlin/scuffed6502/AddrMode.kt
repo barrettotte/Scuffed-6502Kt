@@ -15,5 +15,5 @@ enum class AddrMode{
     IND, // Indirect              - use 2 byte address to get actual 2 byte address
     IZX, // Pre-indexed indirect  - use 1 byte address plus x register value as offset for address on zero page
     IZY, // Post-indexed indirect - use 1 byte address plus y register value as offset for address on zero page
-    REL  // Relative              - address to branch from must be within 1 byte relative offset (branch instructions)
+    REL  // Relative              - address to branch from must be < 1 byte relative offset
 }
