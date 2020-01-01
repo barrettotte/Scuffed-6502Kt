@@ -11,259 +11,932 @@ class Cpu {
         private const val INSTRUCTION_FILE = "instructions.csv" // /resources/instructions.csv
         private const val MEMSIZE   = 0x10000                   // 65536; ram, audio, graphics, IO sections
         private const val SP_LOC    = 0x100                     // location of stack in memory
-        private const val RESET_VL  = 0xFFFC                    // Reset vector low
-        private const val SP_RESET  = 0x1FD                     //
+        private const val RESET_V   = 0xFFFC                    // Reset vector
+        private const val IRQ_V     = 0xFFFE                    // IRQ vector
+        private const val NMI_V     = 0xFFFA                    // NMI vector
+        private const val SP_RESET  = 0xFD                      //
     }
 
     private val instructions: List<Instruction> = initInstructionSet(INSTRUCTION_FILE)
     private val memory: IntArray = IntArray(MEMSIZE)
 
     // Registers
-    private var regSP = SP_LOC // stack pointer TODO: might need to be bounded to 0x00-0xFF ?
-    private var regPC = 0      // program counter
-    private var regA  = 0      // accumulator
-    private var regX  = 0      // register x
-    private var regY  = 0      // register y
+    private var regPC = 0        // program counter
+    private var regSP = SP_LOC   // stack pointer
+    private var regA  = 0        // accumulator
+    private var regX  = 0        // register x
+    private var regY  = 0        // register y
 
-    // Flags
-    private var flagC = 0      // carry flag
-    private var flagZ = 0      // zero flag
-    private var flagI = 0      // disable interrupt flag
-    private var flagD = 0      // decimal (BCD) mode flag (1 -> byte represents number from 0-99)
-    private var flagB = 0      // break command flag
-    private var flagU = 0      // unused flag
-    private var flagV = 0      // overflow flag
-    private var flagN = 0      // negative flag
-
-    // Interrupts
-    private var intNMI = false // non-maskable interrupt signal
-    private var intIRQ = false // interrupt request signal
+    // Flags (Status Register)   NVUB DIZC
+    private var flagC = 0;  private val maskC = (1 shl 0) // carry
+    private var flagZ = 0;  private val maskZ = (1 shl 1) // zero
+    private var flagI = 0;  private val maskI = (1 shl 2) // disable interrupt
+    private var flagD = 0;  private val maskD = (1 shl 3) // decimal (BCD) mode
+    private var flagB = 0;  private val maskB = (1 shl 4) // break command
+    private var flagU = 1;  private val maskU = (1 shl 5) // unused
+    private var flagV = 0;  private val maskV = (1 shl 6) // overflow
+    private var flagN = 0;  private val maskN = (1 shl 7) // negative
 
     // Helpers
-    private var maskInterrupt = false
-    private var interrupt = false
-    private var currentOpcode = 0
+    private var addrAbs = 0x0000
+    private var addrRel = 0x0000
+    private var temp = 0x0000
+    private var fetched = 0x00
     private var cycles = 0
+    private var opcode = 0
 
+
+    // Reset to known state
     fun reset(){
-        cycles = 0
-        regSP = SP_RESET                                     // Reset program counter to
-        regSP = (memory[regSP] or (memory[regSP + 1] shl 8)) //  address in reset vector
-        currentOpcode = memory[regSP]
-        maskInterrupt = true
-        intIRQ = false; intNMI = false
+        addrAbs = RESET_V
+        regPC = readWord(RESET_V)
+        regA = 0; regX = 0; regY = 0
+        regSP = SP_RESET
+        setStatus(0x00 or maskU)
+
+        addrRel = 0x0000
+        addrAbs = 0x0000
+        fetched = 0x00
+        cycles = 8
     }
 
-    // Return flags as a byte
-    fun getStatus() = (flagC shl 0) or (flagZ shl 1) or (flagI shl 2) or (flagD shl 3) or
-                      (flagB shl 4) or (flagU shl 5) or (flagV shl 6) or (flagN shl 7) or 0
+    // Interrupt request
+    fun irq(){ // TODO DRY
+        if(flagI == 0){
+            // Push program counter and status flags to stack
+            pushStack((regPC ushr 8) and 0x00FF)
+            pushStack(regSP and 0x00FF)
+            flagB = 0; flagU = 1; flagI = 1
+            pushStack(getStatus())
 
-    fun setStatus(status: Int){
-        flagC = 1 and (status shr 0); flagZ = 1 and (status shr 1)
-        flagI = 1 and (status shr 2); flagD = 1 and (status shr 3)
-        flagB = 1 and (status shr 4); flagU = 1 and (status shr 5)
-        flagV = 1 and (status shr 6); flagN = 1 and (status shr 7)
+            // Read new pc location
+            addrAbs = IRQ_V
+            regPC = readWord(addrAbs)
+            cycles = 7
+        }
     }
 
-    fun read(addr: Int): Int{
-        val data = memory[addr]
-        cycle()
-        return data
+    // Non-maskable interrupt
+    fun nmi(){ // TODO DRY
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regSP and 0x00FF)
+        flagB = 0; flagU = 1; flagI = 1
+        pushStack(getStatus())
+
+        addrAbs = NMI_V
+        regPC = readWord(addrAbs)
+        cycles = 8
     }
 
-    fun write(addr: Int, data: Int){
-        cycle()
-        memory[addr] = data
+    fun clock(){
+        if(cycles == 0){
+            opcode = readByte(regPC)
+            val instruction = getInstructionByOpcode(opcode)
+            flagU = 1
+            regPC++
+
+            cycles = instruction.cycles
+            val addrCycles = addressingModeHandler(instruction.mode)
+            val opCycles = opcodeHandler(instruction.opcode)
+            cycles += (addrCycles and opCycles)
+            flagU = 1
+        }
+        cycles--
     }
 
-    private fun cycle(){
-        cycles++
-        interrupt = (intNMI || (intIRQ && !maskInterrupt))
+    private fun fetch(): Int{
+        if(getInstructionByOpcode(opcode).mode != AddrMode.IMP){
+            fetched = readByte(addrAbs)
+        }
+        return fetched
     }
 
-    fun step(){
-        currentOpcode = read(regPC++)
-        opcodeHandler(currentOpcode)
-        if(interrupt){
-            if(intNMI){
-                // TODO NMI
-            } else if(intIRQ){
-                // TODO IRQ
+    private fun readByte(addr: Int): Int{  // TODO read from bus
+        if((addr >= 0x0000) and (addr <= 0xFFFF)) {
+            return memory[addr and 0xFFFF]
+        } else {
+            throw Exception("Out of bounds, cannot read address '$addr'")
+        }
+    }
+    private fun readWord(addr: Int):Int = readByte(addr) or (readByte(addr + 1) shl 8)
+
+    private fun writeByte(addr: Int, data: Int){  // TODO write to bus
+        if((addr >= 0x0000) and (addr <= 0xFFFF)) {
+            memory[addr and 0xFFFF] = data
+        } else {
+            throw Exception("Out of bounds, cannot write data '$data' to address '$addr'")
+        }
+    }
+
+    fun loadProgram(rom: List<Int>, pgmEntry: Int){
+        if(pgmEntry < 0){
+            throw Exception("Program entry point '$pgmEntry' out of bounds. [0-$MEMSIZE]")
+        } else if((pgmEntry + rom.size) > MEMSIZE){
+            throw Exception("ROM size too large (${rom.size}) for entry point $pgmEntry")
+        }
+        rom.forEachIndexed{i,_ -> memory[i + pgmEntry] = rom[i] }
+    }
+
+    // Disassemble memory within a range
+    fun disassemble(start: Int, stop: Int): Map<Int,String>{
+        val disassembled: MutableMap<Int,String> = mutableMapOf()
+        var addr = start; var lineAddr: Int
+        var value: Int; var lo: Int; var hi: Int
+        var out: String
+
+        if(start > stop){
+            throw Exception("Cannot start at position greater than stopping position")
+        } else if(start < 0 || start > MEMSIZE){
+            throw Exception("Start position '$start' out of bounds")
+        } else if(stop < 0 || stop > MEMSIZE){
+            throw Exception("Stop position '$stop' out of bounds")
+        }
+        while(addr <= stop){
+            val instruction = getInstructionByOpcode(readByte(addr++))
+            lineAddr = addr
+            out = "$%04X".format(addr) + ":   ${instruction.mnemonic} "
+
+            when {
+                instruction.mode == AddrMode.IMP -> out += "".padEnd(25, ' ')
+                instruction.mode == AddrMode.IMM -> {
+                    value = readByte(addr); addr++
+                    out += "#$%02X".format(value).padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ZP0 -> {
+                    lo = readByte(addr); addr++;
+                    out += "$%02X".format(lo).padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ZPX -> {
+                    lo = readByte(addr); addr++;
+                    out += ("$%02X".format(lo) + ", X").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ZPY -> {
+                    lo = readByte(addr); addr++;
+                    out += ("$%02X".format(lo) + ", Y").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.IZX -> {
+                    lo = readByte(addr); addr++;
+                    out += ("($%02X".format(lo) + ", X)").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.IZY -> {
+                    lo = readByte(addr); addr++;
+                    out += ("($%02X".format(lo) + ", Y)").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ABS -> {
+                    lo = readByte(addr); addr++
+                    hi = readByte(addr); addr++
+                    out += "$%04X".format((hi shl 8) or lo).padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ABX -> {
+                    lo = readByte(addr); addr++
+                    hi = readByte(addr); addr++
+                    out += ("$%04X".format((hi shl 8) or lo) + ", X").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.ABY -> {
+                    lo = readByte(addr); addr++
+                    hi = readByte(addr); addr++
+                    out += ("$%04X".format((hi shl 8) or lo) + ", Y").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.IND -> {
+                    lo = readByte(addr); addr++
+                    hi = readByte(addr); addr++
+                    out += ("($%04X".format((hi shl 8) or lo) + ")").padEnd(25, ' ')
+                }
+                instruction.mode == AddrMode.REL -> {
+                    value = readByte(addr); addr++
+                    out += ("$%02X".format(value) + " [$%04X".format(addr + value) + "]").padEnd(25, ' ')
+                }
             }
+            disassembled[lineAddr] = out +
+                    "{${instruction.mode.name}}   " +
+                    "{${"%02X".format(instruction.opcode)}}     " +
+                    "{${instruction.cycles}}    {${instruction.size}}"
+        }
+        return disassembled
+    }
+
+
+    /******************************************** Instructions ***********************************************/
+    private fun opcodeHandler(opcode: Int): Int{
+        return when(getInstructionByOpcode(opcode).mnemonic){
+            "ADC" -> opADC();    "AND" -> opAND();    "ASL" -> opASL();    "BCC" -> opBCC()
+            "BCS" -> opBCS();    "BEQ" -> opBEQ();    "BIT" -> opBIT();    "BMI" -> opBMI()
+            "BNE" -> opBNE();    "BPL" -> opBPL();    "BRK" -> opBRK();    "BVC" -> opBVC()
+            "BVS" -> opBVS();    "CLC" -> opCLC();    "CLD" -> opCLD();    "CLI" -> opCLI()
+            "CLV" -> opCLV();    "CMP" -> opCMP();    "CPX" -> opCPX();    "CPY" -> opCPY()
+            "DEC" -> opDEC();    "DEX" -> opDEX();    "DEY" -> opDEY();    "EOR" -> opEOR()
+            "INC" -> opINC();    "INX" -> opINX();    "INY" -> opINY();    "JMP" -> opJMP()
+            "JSR" -> opJSR();    "LDA" -> opLDA();    "LDX" -> opLDX();    "LDY" -> opLDY()
+            "LSR" -> opLSR();    "NOP" -> opNOP();    "ORA" -> opORA();    "PHA" -> opPHA()
+            "PHP" -> opPHP();    "PLA" -> opPLA();    "PLP" -> opPLP();    "ROL" -> opROL()
+            "ROR" -> opROR();    "RTI" -> opRTI();    "RTS" -> opRTS();    "SBC" -> opSBC()
+            "SEC" -> opSEC();    "SED" -> opSED();    "SEI" -> opSEI();    "STA" -> opSTA()
+            "STX" -> opSTX();    "STY" -> opSTY();    "TAX" -> opTAX();    "TAY" -> opTAY()
+            "TSX" -> opTSX();    "TXA" -> opTXA();    "TXS" -> opTXS();    "TYA" -> opTYA()
+            else  -> opXXX();
         }
     }
 
+    // Add with carry
+    private fun opADC():Int{
+        fetch()
+        temp = regA + fetched + flagC
+        flagC = if(temp > 255) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0) 1 else 0
+        flagV = if((((regA xor fetched).inv()) and (regA xor temp) and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x80) == 1) 1 else 0
+        regA = temp and 0x00FF
+        return 1
+    }
 
-    // Addressing
-    private fun getAddress(mode: AddrMode): Int{
-        return when(mode){
-            AddrMode.IMM -> addrIMM();    AddrMode.ABS -> addrABS();    AddrMode.ZP0 -> addrZP0()
-            AddrMode.ABX -> addrABX();    AddrMode.ABY -> addrABY();    AddrMode.ZPX -> addrZPX()
-            AddrMode.ZPY -> addrZPY();    AddrMode.IZX -> addrIZX();    AddrMode.IZY -> addrIZY();
-            AddrMode.REL -> addrREL();    else -> 0 // Addressing modes that don't need an address [IMP,ACC,IND]
+    // Bitwise AND (with accumulator)
+    private fun opAND():Int{
+        fetch()
+        regA = regA and fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Arithmetic Shift Left
+    private fun opASL():Int{
+        fetch()
+        temp = fetched shl 1
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((temp and 0x80) == 1) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else {
+            writeByte(addrAbs, temp and 0x00FF)
         }
-    }
-
-    private fun addrIMM() = regPC++
-    private fun addrABS() = read(regPC++) or (read(regPC++) shl 8)
-    private fun addrZP0() = read(regPC++)
-    private fun addrREL() = regPC
-
-    private fun addrABX(): Int{
-        val lo = read(regPC++)
-        val hi = read(regPC++)
-        if(lo + regX > 0xFF){         // ASL, DEC, INC, LSR, ROL, ROR, STA
-            if(currentOpcode in arrayOf(0x1E,0xDE,0xFE,0x5E,0x3E,0x7E,0x9D)){
-                return ((hi shl 8 or lo) + regX) and 0xFFFF
-            } else{
-                read((((hi shl 8 or lo) + regX) - 0xFF) and 0xFFFF)
-            }
-        }
-        return ((hi shl 8 or lo) + regX) and 0xFFFF
-    }
-
-    private fun addrABY(): Int{
-        val lo = read(regPC++)
-        val hi = read(regPC++)                // STA
-        if(lo + regY > 0xFF && currentOpcode != 0x99){
-            read((((hi shl 8 or lo) + regY) - 0xFF) and 0xFFFF)
-        }
-        return ((hi shl 8 or lo) + regY) and 0xFFFF
-    }
-
-    private fun addrZPX(): Int{
-        var addr = read(regPC++)
-        read(addr)
-        addr = (addr + regX) and 0xFF
-        return if(addr > 0xFF) addr - 0x100 else addr
-    }
-
-    private fun addrZPY(): Int{
-        val addr = read(regPC++)
-        read(addr)
-        return (addr + regY) and 0xFF
-    }
-
-    private fun addrIZX(): Int{
-        var addr = read(regPC++)
-        read(addr)
-        addr += regX
-        return read((addr and 0xFF)) or (read((addr + 1) and 0xFF) shl 8)
-    }
-
-    private fun addrIZY(): Int{
-        val tmp = read(regPC++)
-        val addr = read(tmp) + (read((tmp + 1) and 0xFF) shl 8)
-        if((addr and 0xFF) + regY > 0xFF && currentOpcode != 0x91){
-            read((addr + regY - 0xFF) and 0xFFFF)     // STA
-        }
-        return (addr + regY) and 0xFFFF
-    }
-
-
-    // Instructions
-    private fun opcodeHandler(opcode: Int){
-        val ins = getInstructionByOpcode(opcode)
-        when(val mnemonic = ins.mnemonic){
-            "ADC" -> opADC(ins);    "AND" -> opAND(ins);    "ASL" -> opASL(ins);    "BCC" -> opBCC(ins)
-            "BCS" -> opBCS(ins);    "BEQ" -> opBEQ(ins);    "BIT" -> opBIT(ins);    "BMI" -> opBMI(ins)
-            "BNE" -> opBNE(ins);    "BPL" -> opBPL(ins);    "BRK" -> opBRK(ins);    "BVC" -> opBVC(ins)
-            "BVS" -> opBVS(ins);    "CLC" -> opCLC(ins);    "CLD" -> opCLD(ins);    "CLI" -> opCLI(ins)
-            "CLV" -> opCLV(ins);    "CMP" -> opCMP(ins);    "CPX" -> opCPX(ins);    "CPY" -> opCPY(ins)
-            "DEC" -> opDEC(ins);    "DEX" -> opDEX(ins);    "DEY" -> opDEY(ins);    "EOR" -> opEOR(ins)
-            "INC" -> opINC(ins);    "INX" -> opINX(ins);    "INY" -> opINY(ins);    "JMP" -> opJMP(ins)
-            "JSR" -> opJSR(ins);    "LDA" -> opLDA(ins);    "LDX" -> opLDX(ins);    "LDY" -> opLDY(ins)
-            "LSR" -> opLSR(ins);    "NOP" -> opNOP(ins);    "ORA" -> opORA(ins);    "PHA" -> opPHA(ins)
-            "PHP" -> opPHP(ins);    "PLA" -> opPLA(ins);    "PLP" -> opPLP(ins);    "ROL" -> opROL(ins)
-            "ROR" -> opROR(ins);    "RTI" -> opRTI(ins);    "RTS" -> opRTS(ins);    "SBC" -> opSBC(ins)
-            "SEC" -> opSEC(ins);    "SED" -> opSED(ins);    "SEI" -> opSEI(ins);    "STA" -> opSTA(ins)
-            "STX" -> opSTX(ins);    "STY" -> opSTY(ins);    "TAX" -> opTAX(ins);    "TAY" -> opTAY(ins)
-            "TSX" -> opTSX(ins);    "TXA" -> opTXA(ins);    "TXS" -> opTXS(ins);    "TYA" -> opTYA(ins)
-            "???" -> throw Exception("ERROR: Unknown instruction '$mnemonic'.")
-        }
-    }
-
-    private fun opADC(ins: Instruction) = ""
-    private fun opAND(ins: Instruction) = ""
-    private fun opASL(ins: Instruction) = ""
-    private fun opBCC(ins: Instruction) = ""
-    private fun opBCS(ins: Instruction) = ""
-    private fun opBEQ(ins: Instruction) = ""
-    private fun opBIT(ins: Instruction) = ""
-    private fun opBMI(ins: Instruction) = ""
-    private fun opBNE(ins: Instruction) = ""
-    private fun opBPL(ins: Instruction) = ""
-    private fun opBRK(ins: Instruction) = ""
-    private fun opBVC(ins: Instruction) = ""
-    private fun opBVS(ins: Instruction) = ""
-    private fun opCLC(ins: Instruction) = ""
-    private fun opCLD(ins: Instruction) = ""
-    private fun opCLI(ins: Instruction) = ""
-    private fun opCLV(ins: Instruction) = ""
-    private fun opCMP(ins: Instruction) = ""
-    private fun opCPX(ins: Instruction) = ""
-    private fun opCPY(ins: Instruction) = ""
-    private fun opDEC(ins: Instruction) = ""
-    private fun opDEX(ins: Instruction) = ""
-    private fun opDEY(ins: Instruction) = ""
-    private fun opEOR(ins: Instruction) = ""
-    private fun opINC(ins: Instruction) = ""
-    private fun opINX(ins: Instruction) = ""
-    private fun opINY(ins: Instruction) = ""
-    private fun opJMP(ins: Instruction) = ""
-    private fun opJSR(ins: Instruction) = ""
-    private fun opLDA(ins: Instruction) = ""
-    private fun opLDX(ins: Instruction) = ""
-    private fun opLDY(ins: Instruction) = ""
-    private fun opLSR(ins: Instruction) = ""
-    private fun opNOP(ins: Instruction) = ""
-    private fun opORA(ins: Instruction) = ""
-    private fun opPHA(ins: Instruction) = ""
-    private fun opPHP(ins: Instruction) = ""
-    private fun opPLA(ins: Instruction) = ""
-    private fun opPLP(ins: Instruction) = ""
-    private fun opROL(ins: Instruction) = ""
-    private fun opROR(ins: Instruction) = ""
-    private fun opRTI(ins: Instruction) = ""
-    private fun opRTS(ins: Instruction) = ""
-    private fun opSBC(ins: Instruction) = ""
-    private fun opSEC(ins: Instruction) = ""
-    private fun opSED(ins: Instruction) = ""
-    private fun opSEI(ins: Instruction) = ""
-    private fun opSTA(ins: Instruction) = ""
-    private fun opSTX(ins: Instruction) = ""
-    private fun opSTY(ins: Instruction) = ""
-    private fun opTAX(ins: Instruction) = ""
-    private fun opTAY(ins: Instruction) = ""
-    private fun opTSX(ins: Instruction) = ""
-    private fun opTXA(ins: Instruction) = ""
-    private fun opTXS(ins: Instruction) = ""
-    private fun opTYA(ins: Instruction) = ""
-
-
-    // Stack
-    fun peekStack(): Int{
-        return memory[regSP + SP_LOC]
-    }
-    fun pokeStack(data: Int){
-        memory[regSP + SP_LOC] = data
-    }
-    fun pushStack(data: Int){
-        // TODO
-    }
-    fun popStack(): Int{
         return 0
     }
 
-    // Accessors
+    // Branch if carry clear
+    private fun opBCC():Int{
+        if(flagC == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Branch if carry set
+    private fun opBCS():Int{
+        if(flagC == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Branch if equal (zero set)
+    private fun opBEQ():Int{
+        if(flagZ == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Bit test
+    private fun opBIT():Int{
+        fetch()
+        temp = regA and fetched
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((fetched and (1 shl 7)) == 1) 1 else 0
+        flagV = if((fetched and (1 shl 6)) == 1) 1 else 0
+        return 0
+    }
+
+    // Branch on minus (negative set)
+    private fun opBMI():Int{
+        if(flagN == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Branch if not equal (zero clear)
+    private fun opBNE():Int{
+        if(flagZ == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Branch if positive (negative clear)
+    private fun opBPL():Int{
+        if(flagN == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Break
+    private fun opBRK():Int{
+        regPC++
+        flagI = 1
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regPC and 0x00FF)
+        flagB = 1
+        pushStack(getStatus())
+        flagB = 0
+        regPC = readWord(IRQ_V)
+        return 0
+    }
+
+    // Branch if overflow clear
+    private fun opBVC():Int{
+        if(flagV == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Branch if overflow set
+    private fun opBVS():Int{
+        if(flagV == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs
+        }
+        return 0
+    }
+
+    // Clear carry
+    private fun opCLC():Int{
+        flagC = 0
+        return 0
+    }
+
+    // Clear decimal
+    private fun opCLD():Int{
+        flagD = 0
+        return 0
+    }
+
+    // Clear interrupt
+    private fun opCLI():Int{
+        flagI = 0
+        return 0
+    }
+
+    // Clear overflow
+    private fun opCLV():Int{
+        flagV = 0
+        return 0
+    }
+
+    // Compare (with accumulator)
+    private fun opCMP():Int{
+        fetch()
+        temp = regA - fetched
+        flagC = if(regA >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        return 1
+    }
+
+    // Compare X register
+    private fun opCPX():Int{
+        fetch()
+        temp = regX - fetched
+        flagC = if(regX >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        return 0
+    }
+
+    // Compare Y register
+    private fun opCPY():Int{
+        fetch()
+        temp = regY - fetched
+        flagC = if(regY >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        return 0
+    }
+
+    // Decrement (at memory location)
+    private fun opDEC():Int{
+        fetch()
+        temp = fetched - 1
+        writeByte(addrAbs, temp and 0x00FF)
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        return 0
+    }
+
+    // Decrement X register
+    private fun opDEX():Int{
+        regX--
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Decrement Y register
+    private fun opDEY():Int{
+        regY--
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Bitwise XOR (with accumulator)
+    private fun opEOR():Int{
+        fetch()
+        regA = regA xor fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Increment (at memory location)
+    private fun opINC():Int{
+        fetch()
+        temp = fetched + 1
+        writeByte(addrAbs, temp and 0x00FF)
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        return 0
+    }
+
+    // Increment X register
+    private fun opINX():Int{
+        regX++
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Increment Y register
+    private fun opINY():Int{
+        regY++
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Jump
+    private fun opJMP():Int{
+        regPC = addrAbs
+        return 0
+    }
+
+    // Jump to subroutine
+    private fun opJSR():Int{
+        regPC--
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regPC and 0x00FF)
+        regPC = addrAbs
+        return 0
+    }
+
+    // Load accumulator
+    private fun opLDA():Int{
+        fetch()
+        regA = fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Load X register
+    private fun opLDX():Int{
+        fetch()
+        regX = fetched
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Load Y register
+    private fun opLDY():Int{
+        fetch()
+        regY = fetched
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Logical Shift Right
+    private fun opLSR():Int{
+        fetch()
+        flagC = if((fetched and 0x0001) == 1) 1 else 0
+        temp = fetched ushr 1
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else {
+            writeByte(addrAbs, temp and 0x00FF)
+        }
+        return 0
+    }
+
+    // No operation  (TODO add in illegal opcodes)
+    private fun opNOP():Int{
+        return when(opcode){
+            0x1C-> 1;   0x3C-> 1;   0x5C-> 1;   0x7C-> 1;
+            0xDC-> 1;   0xFC-> 1;   else-> 0
+        }
+    }
+
+    // Biwise OR (with accumulator)
+    private fun opORA():Int{
+        fetch()
+        regA = regA or fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 1
+    }
+
+    // Push accumulator (to stack)
+    private fun opPHA():Int{
+        pushStack(regA)
+        return 0
+    }
+
+    // Push status register (to stack)
+    private fun opPHP():Int{
+        pushStack(getStatus() or maskB or maskU)
+        flagB = 0
+        flagU = 0
+        return 0
+    }
+
+    // Pop accumulator (from stack)
+    private fun opPLA():Int{
+        regA = popStack()
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Pop status register (from stack)
+    private fun opPLP():Int{
+        setStatus(popStack())
+        flagU = 1
+        return 0
+    }
+
+    // Rotate Left
+    private fun opROL():Int{
+        fetch()
+        temp = (fetched shl 1) or flagC
+        flagC = if((temp and 0xFF00) == 1) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else{
+            writeByte(addrAbs, temp and 0x00FF)
+        }
+        return 0
+    }
+
+    // Rotate Right
+    private fun opROR():Int{
+        fetch()
+        temp = (flagC shl 7) or (fetched ushr 1)
+        flagC = if((fetched and 0x01) == 1) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else{
+            writeByte(addrAbs, temp and 0x00FF)
+        }
+        return 0
+    }
+
+    // Return from interrupt
+    private fun opRTI():Int{
+        setStatus(popStack())
+        setStatus((getStatus() and maskB.inv()))
+        setStatus((getStatus() and maskU.inv()))
+        regPC = popStack() or (popStack() shl 8)
+        return 0
+    }
+
+    // Return from subroutine
+    private fun opRTS():Int{
+        regPC = popStack() or (popStack() shl 8)
+        regPC++
+        return 0
+    }
+
+    // Subtract with carry
+    private fun opSBC():Int{
+        fetch()
+        val value = fetched xor 0x00FF
+        temp = regA + value + flagC
+        flagC = if((temp and 0xFF00) == 1) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0) 1 else 0
+        flagV = if(((temp xor regA) and (temp xor value) and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) == 1) 1 else 0
+        regA = temp and 0x00FF
+        return 1
+    }
+
+    // Set carry
+    private fun opSEC():Int{
+        flagC = 1
+        return 0
+    }
+
+    // Set decimal
+    private fun opSED():Int{
+        flagD = 1
+        return 0
+    }
+
+    // Set interrupt
+    private fun opSEI():Int{
+        flagI = 1
+        return 0
+    }
+
+    // Store accumulator (at address)
+    private fun opSTA():Int{
+        writeByte(addrAbs, regA)
+        return 0
+    }
+
+    // Store X register (at address)
+    private fun opSTX():Int{
+        writeByte(addrAbs, regX)
+        return 0
+    }
+
+    // Store Y register (at address)
+    private fun opSTY():Int{
+        writeByte(addrAbs, regY)
+        return 0
+    }
+
+    // Transfer accumulator to X register
+    private fun opTAX():Int{
+        regX = regA
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Transfer accumulator to Y register
+    private fun opTAY():Int{
+        regY = regA
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Transfer stack pointer to X register
+    private fun opTSX():Int{
+        regX = regSP
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Transfer X register to Accumulator
+    private fun opTXA():Int{
+        regA = regX
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Transfer X register to stack pointer
+    private fun opTXS():Int{
+        regSP = regX
+        return 0
+    }
+
+    // Transfer Y register to Accumulator
+    private fun opTYA():Int{
+        regA = regY
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) == 1) 1 else 0
+        return 0
+    }
+
+    // Illegal opcodes
+    private fun opXXX():Int{
+        throw Exception("ERROR: Illegal opcode '$opcode' encountered.")
+    }
+
+
+
+    /****************************************** Addressing Modes *********************************************/
+    private fun addressingModeHandler(mode: AddrMode): Int{
+        return when(mode){
+            AddrMode.IMM -> addrIMM();    AddrMode.ABS -> addrABS();    AddrMode.ZP0 -> addrZP0()
+            AddrMode.ABX -> addrABX();    AddrMode.ABY -> addrABY();    AddrMode.ZPX -> addrZPX()
+            AddrMode.ZPY -> addrZPY();    AddrMode.IZX -> addrIZX();    AddrMode.IZY -> addrIZY()
+            AddrMode.REL -> addrREL();    AddrMode.IMP -> addrIMP();    AddrMode.ACC -> addrACC()
+            AddrMode.IND -> addrIND()
+        }
+    }
+
+    private fun addrIMM(): Int{
+        addrAbs = regPC++
+        return 0
+    }
+
+    private fun addrABS(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+        addrAbs = (hi shl 8) or lo
+        return 0
+    }
+
+    private fun addrZP0(): Int{
+        addrAbs = readByte(regPC)
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrABX(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regX
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0 // page boundary
+    }
+
+    private fun addrABY(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regY
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0 // page boundary
+    }
+
+    private fun addrZPX(): Int{
+        addrAbs = readByte(regPC) + regX
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrZPY(): Int{
+        addrAbs = readByte(regPC) + regY
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrIZX(): Int{
+        val t = readByte(regPC)
+        regPC++
+        val lo = readByte((t + regX) and 0x00FF)
+        val hi = readByte((t + regX + 1) and 0x00FF)
+        addrAbs = (hi shl 8) or lo
+        return 0
+    }
+
+    private fun addrIZY(): Int{
+        val t = readByte(regPC)
+        regPC++
+        val lo = readByte(t and 0x00FF)
+        val hi = readByte((t + 1) and 0x00FF)
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regY
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0
+    }
+
+    // address must be within -128 to +127 of branch instruction
+    private fun addrREL(): Int{
+        addrRel = readByte(regPC)
+        regPC++
+        if((addrRel and 0x80) == 0x80){
+            addrRel = addrRel or 0xFF00
+        }
+        return 0
+    }
+
+    private fun addrIMP(): Int{
+        fetched = regA
+        return 0
+    }
+
+    private fun addrACC(): Int{
+        throw Exception("ACC addressing mode unimplemented")
+    }
+
+    private fun addrIND(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+        val addr = (hi shl 8) or lo
+
+        addrAbs = if(lo == 0x00FF){  // Simulate page boundary bug
+            (readByte(addr and 0xFF00) shl 8) or readByte(addr)
+        } else {
+            (readByte(addr + 1) shl 8) or readByte(addr)
+        }
+        return 0
+    }
+
+
+    /****************************************** Stack and Status *********************************************/
+    private fun peekStack(): Int{
+        return memory[regSP + SP_LOC]
+    }
+
+    private fun pokeStack(data: Int){
+        memory[regSP + SP_LOC] = data
+    }
+
+    private fun pushStack(data: Int){
+        writeByte(regSP + SP_LOC, data)
+        regSP--
+    }
+
+    private fun popStack(): Int{
+        regSP++
+        return readByte(regSP + SP_LOC)
+    }
+
+    // Flags to status register conversions
+    fun getStatus() = (flagC shl 0) or (flagZ shl 1) or (flagI shl 2) or (flagD shl 3) or
+            (flagB shl 4) or (flagU shl 5) or (flagV shl 6) or (flagN shl 7) or 0
+
+    fun setStatus(status: Int){
+        flagC = 1 and (status ushr 0); flagZ = 1 and (status ushr 1)
+        flagI = 1 and (status ushr 2); flagD = 1 and (status ushr 3)
+        flagB = 1 and (status ushr 4); flagU = 1 and (status ushr 5)
+        flagV = 1 and (status ushr 6); flagN = 1 and (status ushr 7)
+    }
+
+
+    /****************************************** Utils and Accessors ******************************************/
     fun getInstructionSet() = instructions
     fun getMemory() = memory
     fun getCycles() = cycles
 
-    // Utils
-    fun peek(addr: Int) = memory[addr]
-    fun wipeMemory() = memory.forEachIndexed{_,i -> memory[i] = 0x00}
+    fun getFlag(f: String): Int{
+        return when(f.toUpperCase()){
+            "N"-> flagN;   "V"-> flagV;   "U"-> flagU;   "B"-> flagB;
+            "D"-> flagD;   "I"-> flagI;   "Z"-> flagZ;   "C"-> flagC
+            else -> throw Exception("'$f' is not a valid flag [N,V,U,B,D,I,Z,C]")
+        }
+    }
+
+    fun peek(addr: Int) = memory[addr] // Read memory with no cycle
+    fun wipeMemory() = memory.forEachIndexed{i,_ -> memory[i] = 0x00}
+
     private fun getInstructionByOpcode(opcode: Int) = instructions.find{it.opcode == opcode} ?: Instruction()
+    private fun getAddrModeByOpcode(opcode: Int) = getInstructionByOpcode(opcode).mode
 
     private fun initInstructionSet(fileName: String): List<Instruction>{
         val instructions : MutableList<Instruction> = mutableListOf()

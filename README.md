@@ -1,7 +1,7 @@
 # Scuffed 6502 Kt
 
 I've been planning on learning kotlin for awhile since I'm already pretty familiar with Java and Groovy.
-So, why not make something interesting.
+So, why not make something interesting like a subpar CPU emulator.
 
 
 ## Commands
