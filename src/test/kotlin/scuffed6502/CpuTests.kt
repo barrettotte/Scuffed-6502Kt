@@ -68,8 +68,9 @@ class CpuTests {
 
     private fun outputDisassembly(path: String, memory: Map<Int, String>){
         File(path).printWriter().use { out ->
-            out.println(" Index    Address            Assembly            Mode   Opcode  Cycles  Size")
-            out.println("----------------------------------------------------------------------------")
+            out.println("------------------------------------------------------------------------------")
+            out.println(" Index    Address            Assembly             Mode    Opcode  Cycles  Size")
+            out.println("------------------------------------------------------------------------------")
             memory.forEach{
                 (k,v) -> out.println("[${k.toString().padStart(5,'0')}]    $v")
             }

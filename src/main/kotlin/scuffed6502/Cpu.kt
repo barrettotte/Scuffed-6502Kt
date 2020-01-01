@@ -154,7 +154,7 @@ class Cpu {
         while(addr <= stop){
             val instruction = getInstructionByOpcode(readByte(addr++))
             lineAddr = addr
-            out = "$%04X".format(addr) + ":   ${instruction.mnemonic} "
+            out = "$%04X".format(addr) + ":    ${instruction.mnemonic} "
 
             when {
                 instruction.mode == AddrMode.IMP -> out += "".padEnd(25, ' ')
@@ -208,8 +208,8 @@ class Cpu {
                 }
             }
             disassembled[lineAddr] = out +
-                    "{${instruction.mode.name}}   " +
-                    "{${"%02X".format(instruction.opcode)}}     " +
+                    "{${instruction.mode.name}}    " +
+                    "{${"%02X".format(instruction.opcode)}}    " +
                     "{${instruction.cycles}}    {${instruction.size}}"
         }
         return disassembled
