@@ -115,7 +115,7 @@ class Cpu {
         if((addr >= 0x0000) and (addr <= 0xFFFF)) {
             return memory[addr and 0xFFFF]
         } else {
-            throw Exception("Out of bounds, cannot read address '$addr'")
+            throw cpuError("Out of bounds, cannot read address '$addr'")
         }
     }
     private fun readWord(addr: Int):Int = readByte(addr) or (readByte(addr + 1) shl 8)
@@ -124,25 +124,29 @@ class Cpu {
         if((addr >= 0x0000) and (addr <= 0xFFFF)) {
             memory[addr and 0xFFFF] = data
         } else {
-            throw Exception("Out of bounds, cannot write data '$data' to address '$addr'")
+            throw cpuError("Out of bounds, cannot write data '$data' to address '$addr'")
         }
     }
 
-    fun loadProgram(rom: List<Int>, pgmEntry: Int){
+    fun loadProgram(rom: List<Int>, pgmEntry: Int, resetHi: Int = 0x00, resetLo: Int = 0x80): Map<Int,Disassembly>{
         if(pgmEntry < 0){
             throw Exception("Program entry point '$pgmEntry' out of bounds. [0-$MEMSIZE]")
         } else if((pgmEntry + rom.size) > MEMSIZE){
             throw Exception("ROM size too large (${rom.size}) for entry point $pgmEntry")
         }
         rom.forEachIndexed{i,_ -> memory[i + pgmEntry] = rom[i] }
+        writeByte(RESET_V, resetHi)
+        writeByte(RESET_V+1, resetLo)
+        // TODO IRQ,NMI ?
+        val disassembly = disassemble(0x0000, 0xFFFF)
+        reset()
+        return disassembly
     }
 
     // Disassemble memory within a range
-    fun disassemble(start: Int, stop: Int): Map<Int,String>{
-        val disassembled: MutableMap<Int,String> = mutableMapOf()
+    fun disassemble(start: Int, stop: Int): Map<Int,Disassembly>{
+        val disassembled: MutableMap<Int,Disassembly> = mutableMapOf()
         var addr = start; var lineAddr: Int
-        var value: Int; var lo: Int; var hi: Int
-        var out: String
 
         if(start > stop){
             throw Exception("Cannot start at position greater than stopping position")
@@ -152,65 +156,65 @@ class Cpu {
             throw Exception("Stop position '$stop' out of bounds")
         }
         while(addr <= stop){
-            val instruction = getInstructionByOpcode(readByte(addr++))
             lineAddr = addr
-            out = "$%04X".format(addr) + ":    ${instruction.mnemonic} "
+            val instruction = getInstructionByOpcode(readByte(addr))
+            val hex: MutableList<Int> = mutableListOf(instruction.opcode)
+            var asm = "$%04X".format(addr++) + ":    ${instruction.mnemonic} "
 
-            when {
-                instruction.mode == AddrMode.IMP -> out += "".padEnd(25, ' ')
-                instruction.mode == AddrMode.IMM -> {
-                    value = readByte(addr); addr++
-                    out += "#$%02X".format(value).padEnd(25, ' ')
+            when (instruction.mode) {
+                AddrMode.IMP -> asm += ""
+                AddrMode.ACC -> asm += ""
+                AddrMode.IMM -> {
+                    hex.add(readByte(addr++))
+                    asm += "#$%02X".format(hex[1])
                 }
-                instruction.mode == AddrMode.ZP0 -> {
-                    lo = readByte(addr); addr++;
-                    out += "$%02X".format(lo).padEnd(25, ' ')
+                AddrMode.ZP0 -> {
+                    hex.add(readByte(addr++))
+                    asm += "$%02X".format(hex[1])
                 }
-                instruction.mode == AddrMode.ZPX -> {
-                    lo = readByte(addr); addr++;
-                    out += ("$%02X".format(lo) + ", X").padEnd(25, ' ')
+                AddrMode.ZPX -> {
+                    hex.add(readByte(addr++))
+                    asm += "$%02X".format(hex[1]) + ", X"
                 }
-                instruction.mode == AddrMode.ZPY -> {
-                    lo = readByte(addr); addr++;
-                    out += ("$%02X".format(lo) + ", Y").padEnd(25, ' ')
+                AddrMode.ZPY -> {
+                    hex.add(readByte(addr++))
+                    asm += "$%02X".format(hex[1]) + ", Y"
                 }
-                instruction.mode == AddrMode.IZX -> {
-                    lo = readByte(addr); addr++;
-                    out += ("($%02X".format(lo) + ", X)").padEnd(25, ' ')
+                AddrMode.IZX -> {
+                    hex.add(readByte(addr++))
+                    asm += "($%02X".format(hex[1]) + ", X)"
                 }
-                instruction.mode == AddrMode.IZY -> {
-                    lo = readByte(addr); addr++;
-                    out += ("($%02X".format(lo) + ", Y)").padEnd(25, ' ')
+                AddrMode.IZY -> {
+                    hex.add(readByte(addr++))
+                    asm += "($%02X".format(hex[1]) + ", Y)"
                 }
-                instruction.mode == AddrMode.ABS -> {
-                    lo = readByte(addr); addr++
-                    hi = readByte(addr); addr++
-                    out += "$%04X".format((hi shl 8) or lo).padEnd(25, ' ')
+                AddrMode.ABS -> {
+                    hex.add(readByte(addr++))
+                    hex.add(readByte(addr++))
+                    asm += "$%04X".format((hex[2] shl 8) or hex[1])
                 }
-                instruction.mode == AddrMode.ABX -> {
-                    lo = readByte(addr); addr++
-                    hi = readByte(addr); addr++
-                    out += ("$%04X".format((hi shl 8) or lo) + ", X").padEnd(25, ' ')
+                AddrMode.ABX -> {
+                    hex.add(readByte(addr++))
+                    hex.add(readByte(addr++))
+                    asm += "$%04X".format((hex[2] shl 8) or hex[1]) + ", X"
                 }
-                instruction.mode == AddrMode.ABY -> {
-                    lo = readByte(addr); addr++
-                    hi = readByte(addr); addr++
-                    out += ("$%04X".format((hi shl 8) or lo) + ", Y").padEnd(25, ' ')
+                AddrMode.ABY -> {
+                    hex.add(readByte(addr++))
+                    hex.add(readByte(addr++))
+                    asm += "$%04X".format((hex[2] shl 8) or hex[1]) + ", Y"
                 }
-                instruction.mode == AddrMode.IND -> {
-                    lo = readByte(addr); addr++
-                    hi = readByte(addr); addr++
-                    out += ("($%04X".format((hi shl 8) or lo) + ")").padEnd(25, ' ')
+                AddrMode.IND -> {
+                    hex.add(readByte(addr++))
+                    hex.add(readByte(addr++))
+                    asm += "($%04X".format((hex[2] shl 8) or hex[1]) + ")"
                 }
-                instruction.mode == AddrMode.REL -> {
-                    value = readByte(addr); addr++
-                    out += ("$%02X".format(value) + " [$%04X".format(addr + value) + "]").padEnd(25, ' ')
+                AddrMode.REL -> {
+                    hex.add(readByte(addr++))
+                    asm += "$%02X".format(hex[1]) + " [$%04X".format(addr + hex[1]) + "]"
                 }
             }
-            disassembled[lineAddr] = out +
-                    "{${instruction.mode.name}}    " +
-                    "{${"%02X".format(instruction.opcode)}}    " +
-                    "{${instruction.cycles}}    {${instruction.size}}"
+            disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(25, ' '),
+                instruction, hex.joinToString(" "){"%02X".format(it)})
         }
         return disassembled
     }
@@ -233,7 +237,7 @@ class Cpu {
             "SEC" -> opSEC();    "SED" -> opSED();    "SEI" -> opSEI();    "STA" -> opSTA()
             "STX" -> opSTX();    "STY" -> opSTY();    "TAX" -> opTAX();    "TAY" -> opTAY()
             "TSX" -> opTSX();    "TXA" -> opTXA();    "TXS" -> opTXS();    "TYA" -> opTYA()
-            else  -> opXXX();
+            else  -> opXXX()
         }
     }
 
@@ -761,7 +765,7 @@ class Cpu {
 
     // Illegal opcodes
     private fun opXXX():Int{
-        throw Exception("ERROR: Illegal opcode '$opcode' encountered.")
+        throw cpuError("Illegal opcode encountered")
     }
 
 
@@ -857,7 +861,7 @@ class Cpu {
     private fun addrREL(): Int{
         addrRel = readByte(regPC)
         regPC++
-        if((addrRel and 0x80) == 0x80){
+        if((addrRel and 0x80) == 1){
             addrRel = addrRel or 0xFF00
         }
         return 0
@@ -869,7 +873,8 @@ class Cpu {
     }
 
     private fun addrACC(): Int{
-        throw Exception("ACC addressing mode unimplemented")
+        fetched = regA
+        return 0
     }
 
     private fun addrIND(): Int{
@@ -926,17 +931,18 @@ class Cpu {
 
     fun getFlag(f: String): Int{
         return when(f.toUpperCase()){
-            "N"-> flagN;   "V"-> flagV;   "U"-> flagU;   "B"-> flagB;
+            "N"-> flagN;   "V"-> flagV;   "U"-> flagU;   "B"-> flagB
             "D"-> flagD;   "I"-> flagI;   "Z"-> flagZ;   "C"-> flagC
-            else -> throw Exception("'$f' is not a valid flag [N,V,U,B,D,I,Z,C]")
+            else -> throw cpuError("'$f' is not a valid flag [N,V,U,B,D,I,Z,C]")
         }
     }
 
     fun peek(addr: Int) = memory[addr] // Read memory with no cycle
     fun wipeMemory() = memory.forEachIndexed{i,_ -> memory[i] = 0x00}
 
-    private fun getInstructionByOpcode(opcode: Int) = instructions.find{it.opcode == opcode} ?: Instruction()
+    private fun getInstructionByOpcode(opcode: Int): Instruction = instructions.find {it.opcode == opcode} ?: throw cpuError("Invalid opcode '$opcode'")
     private fun getAddrModeByOpcode(opcode: Int) = getInstructionByOpcode(opcode).mode
+    private fun cpuError(msg: String): CpuException = CpuException(msg, opcode, getStatus())
 
     private fun initInstructionSet(fileName: String): List<Instruction>{
         val instructions : MutableList<Instruction> = mutableListOf()
@@ -945,7 +951,7 @@ class Cpu {
         try{
             csvReader.readAll().forEach{record ->
                 instructions.add(Instruction(record[0].toUpperCase(), record[1].toInt(16),
-                    record[2].toInt(), record[3].toInt(), AddrMode.valueOf(record[4].toUpperCase())))
+                    AddrMode.valueOf(record[2].toUpperCase()), record[3].toInt()))
             }
         } catch(e: Exception){
             println("Error loading instructions.")
@@ -956,6 +962,4 @@ class Cpu {
         }
         return instructions
     }
-
 }
-

@@ -1,6 +1,6 @@
 # Scuffed 6502 Kt
 
-I've been planning on learning kotlin for awhile since I'm already pretty familiar with Java and Groovy.
+I've been planning on learning kotlin for a while since I'm already pretty familiar with Java and Groovy.
 So, why not make something interesting like a subpar CPU emulator.
 
 
@@ -9,6 +9,7 @@ So, why not make something interesting like a subpar CPU emulator.
 
 
 ## References
+* Klaus Functional Tests https://github.com/Klaus2m5/6502_65C02_functional_tests
 * Datasheet http://archive.6502.org/datasheets/rockwell_r650x_r651x.pdf
 * 6502 Instruction set
   * https://www.masswerk.at/6502/6502_instruction_set.html
