@@ -161,56 +161,52 @@ class Cpu {
             val hex: MutableList<Int> = mutableListOf(instruction.opcode)
             var asm = "$%04X".format(addr++) + ":    ${instruction.mnemonic} "
 
-            when (instruction.mode) {
-                AddrMode.IMP -> asm += ""
-                AddrMode.ACC -> asm += ""
+            asm += when (instruction.mode) {
+                AddrMode.IMP -> ""
+                AddrMode.ACC -> ""
                 AddrMode.IMM -> {
                     hex.add(readByte(addr++))
-                    asm += "#$%02X".format(hex[1])
+                    "#$%02X".format(hex[1])
                 }
                 AddrMode.ZP0 -> {
                     hex.add(readByte(addr++))
-                    asm += "$%02X".format(hex[1])
+                    "$%02X".format(hex[1])
                 }
                 AddrMode.ZPX -> {
                     hex.add(readByte(addr++))
-                    asm += "$%02X".format(hex[1]) + ", X"
+                    "$%02X".format(hex[1]) + ", X"
                 }
                 AddrMode.ZPY -> {
                     hex.add(readByte(addr++))
-                    asm += "$%02X".format(hex[1]) + ", Y"
+                    "$%02X".format(hex[1]) + ", Y"
                 }
                 AddrMode.IZX -> {
                     hex.add(readByte(addr++))
-                    asm += "($%02X".format(hex[1]) + ", X)"
+                    "($%02X".format(hex[1]) + ", X)"
                 }
                 AddrMode.IZY -> {
                     hex.add(readByte(addr++))
-                    asm += "($%02X".format(hex[1]) + ", Y)"
+                    "($%02X".format(hex[1]) + ", Y)"
                 }
                 AddrMode.ABS -> {
-                    hex.add(readByte(addr++))
-                    hex.add(readByte(addr++))
-                    asm += "$%04X".format((hex[2] shl 8) or hex[1])
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1])
                 }
                 AddrMode.ABX -> {
-                    hex.add(readByte(addr++))
-                    hex.add(readByte(addr++))
-                    asm += "$%04X".format((hex[2] shl 8) or hex[1]) + ", X"
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1]) + ", X"
                 }
                 AddrMode.ABY -> {
-                    hex.add(readByte(addr++))
-                    hex.add(readByte(addr++))
-                    asm += "$%04X".format((hex[2] shl 8) or hex[1]) + ", Y"
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1]) + ", Y"
                 }
                 AddrMode.IND -> {
-                    hex.add(readByte(addr++))
-                    hex.add(readByte(addr++))
-                    asm += "($%04X".format((hex[2] shl 8) or hex[1]) + ")"
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "($%04X".format((hex[2] shl 8) or hex[1]) + ")"
                 }
                 AddrMode.REL -> {
                     hex.add(readByte(addr++))
-                    asm += "$%02X".format(hex[1]) + " [$%04X".format(addr + hex[1]) + "]"
+                    "$%02X".format(hex[1]) + " [$%04X".format(addr + hex[1]) + "]"
                 }
             }
             disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(25, ' '),
