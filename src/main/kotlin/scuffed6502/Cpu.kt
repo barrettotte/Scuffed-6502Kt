@@ -159,7 +159,7 @@ class Cpu {
             lineAddr = addr
             val instruction = getInstructionByOpcode(readByte(addr))
             val hex: MutableList<Int> = mutableListOf(instruction.opcode)
-            var asm = "$%04X".format(addr++) + ":    ${instruction.mnemonic} "
+            var asm = "$%04X".format(addr++) + "     ${instruction.mnemonic} "
 
             asm += when (instruction.mode) {
                 AddrMode.IMP -> ""
@@ -206,10 +206,10 @@ class Cpu {
                 }
                 AddrMode.REL -> {
                     hex.add(readByte(addr++))
-                    "$%02X".format(hex[1]) + " [$%04X".format(addr + hex[1]) + "]"
+                    "%02X".format(hex[1]) + "  " + "%02X".format(addr) + "  ${"%04X".format(addr + hex[1])}"
                 }
             }
-            disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(25, ' '),
+            disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(30, ' '),
                 instruction, hex.joinToString(" "){"%02X".format(it)})
         }
         return disassembled

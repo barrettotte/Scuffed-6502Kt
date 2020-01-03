@@ -7,7 +7,6 @@ data class Disassembly(
     var hex: String
 ){
     override fun toString(): String{
-        return "$assembly {${instruction.mode.name}}    {${"%02X".format(instruction.opcode)}}    "  +
-            "{${instruction.cycles}}        $hex"
+        return "$assembly${hex.padEnd(13)}${instruction.mode.name}     ${instruction.cycles}"
     }
 }

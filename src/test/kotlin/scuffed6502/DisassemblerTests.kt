@@ -36,40 +36,40 @@ class DissassemblerTests {
 			NOP
 			NOP
         */
-        val entry = 0x600
+        val entry = 0x8000
         val pgm = listOf(
                 0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00, 0x18,
                 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA)
         val da = cpu.loadProgram(pgm, entry)
-        outputDisassembly("./disassembly.txt", da, entry - 4, entry + 32)
+        outputDisassembly("./disassembly.txt", da, entry, entry + 27)
 
         assertEquals(32768, da.size)
 
         // Test hex dumps
-        assertEquals(da[0x0600]?.hex, "A2 0A")
-        assertEquals(da[0x0602]?.hex, "8E 00 00")
-        assertEquals(da[0x0605]?.hex, "A2 03")
-        assertEquals(da[0x0607]?.hex, "8E 01 00")
-        assertEquals(da[0x060A]?.hex, "AC 00 00")
-        assertEquals(da[0x060D]?.hex, "A9 00")
-        assertEquals(da[0x060F]?.hex, "18")
-        assertEquals(da[0x0610]?.hex, "6D 01 00")
-        assertEquals(da[0x0613]?.hex, "88")
-        assertEquals(da[0x0614]?.hex, "D0 FA")
-        assertEquals(da[0x0616]?.hex, "8D 02 00")
-        assertEquals(da[0x0619]?.hex, "EA")
-        assertEquals(da[0x061A]?.hex, "EA")
-        assertEquals(da[0x061B]?.hex, "EA")
+        assertEquals(da[0x8000]?.hex, "A2 0A")
+        assertEquals(da[0x8002]?.hex, "8E 00 00")
+        assertEquals(da[0x8005]?.hex, "A2 03")
+        assertEquals(da[0x8007]?.hex, "8E 01 00")
+        assertEquals(da[0x800A]?.hex, "AC 00 00")
+        assertEquals(da[0x800D]?.hex, "A9 00")
+        assertEquals(da[0x800F]?.hex, "18")
+        assertEquals(da[0x8010]?.hex, "6D 01 00")
+        assertEquals(da[0x8013]?.hex, "88")
+        assertEquals(da[0x8014]?.hex, "D0 FA")
+        assertEquals(da[0x8016]?.hex, "8D 02 00")
+        assertEquals(da[0x8019]?.hex, "EA")
+        assertEquals(da[0x801A]?.hex, "EA")
+        assertEquals(da[0x801B]?.hex, "EA")
     }
 
     private fun outputDisassembly(path: String, memory: Map<Int, Disassembly>, start: Int = 0, end: Int = 1024){
         File(path).printWriter().use { out ->
-            out.println("-".repeat(90))
-            out.println(" Index    Address               Assembly           Mode    Opcode  Cycles      Hex Dump")
-            out.println("-".repeat(90))
+            out.println("-".repeat(66))
+            out.println("Index     Address   Assembly            Hex Dump     Mode   Cycles")
+            out.println("-".repeat(66))
             memory.forEach{(k,v) ->
                 if(k in start..end){
-                    out.println("[${k.toString().padStart(5, '0')}]    $v ")
+                    out.println("${k.toString().padStart(5, '0')}     $v ")
                 }
             }
         }
