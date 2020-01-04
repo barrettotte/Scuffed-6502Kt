@@ -1,11 +1,8 @@
 package scuffed6502
 
-import com.fasterxml.jackson.annotation.JsonInclude
-
-@JsonInclude(JsonInclude.Include.NON_EMPTY)
-data class Instruction (
-        val mnemonic: String = "",
-        val impl: String = "",
-        val addrMode: String = "",
-        val cycles: Int = 0
+data class Instruction(
+    val mnemonic: String = "???",
+    val opcode: Int = "EA".toInt(16),
+    val mode: AddrMode = AddrMode.IMP,
+    val cycles: Int = 2
 )

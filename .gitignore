@@ -8,3 +8,6 @@ bin/
 *.iml
 out/
 .vscode/
+*.jar
+
+dump.txt

@@ -1,861 +1,1005 @@
 package scuffed6502
 
-import com.fasterxml.jackson.module.kotlin.*
+import com.opencsv.CSVReaderBuilder
+import com.sun.org.apache.xpath.internal.operations.Bool
+import java.io.BufferedReader
+import java.io.File
+import java.io.InputStreamReader
 
-@ExperimentalUnsignedTypes
-@Suppress("EXPERIMENTAL_UNSIGNED_LITERALS")
-class Cpu(val bus: Bus): IDevice {
+@Suppress("SameParameterValue")
+class Cpu {
 
-    var regAcc: UByte = 0U
-    var regX: UByte = 0U
-    var regY: UByte = 0U
-    var stkPtr: UByte = 0U
-    var pc: UShort = 0U
-    var regStatus: UByte = 0U
-    private var fetched: UByte = 0U
-    private var addrAbs: UShort = 0U
-    private var addrRel: UShort = 0U // Branch within a certain distance of originating call
-    private var opcode: UByte = 0U
-    private var cycles: UByte = 0U
-
-    var logData: MutableList<Map<String,String>> = mutableListOf()
-
-    val instructions: List<Instruction> = jacksonObjectMapper()
-            .readValue(javaClass.classLoader.getResource("Cpu.json").readText())
-
-    val flags = mutableMapOf(
-            "C" to false, "Z" to false, "I" to false, "D" to false,
-            "B" to false, "U" to false, "V" to false, "N" to false
-    )
-
-    fun getFlag(f: String): Boolean{
-        return flags[f.toUpperCase()] ?: false
+    companion object {
+        private const val INSTRUCTION_FILE = "instructions.csv" // /resources/instructions.csv
+        private const val LOG_PATH  = "log.txt"                 //
+        private const val MEMSIZE   = 0x10000                   // 65536; ram, audio, graphics, IO sections
+        private const val SP_LOC    = 0x100                     // location of stack in memory
+        private const val RESET_V   = 0xFFFC                    // Reset vector
+        private const val IRQ_V     = 0xFFFE                    // IRQ vector
+        private const val NMI_V     = 0xFFFA                    // NMI vector
+        private const val SP_RESET  = 0xFD                      // Stack pointer reset location
     }
 
-    fun setFlag(f: String, v: Boolean){
-        flags[f.toUpperCase()] = v
-        var bin = ""
-        flags.forEach{ (k, v) ->
-            bin += (if(v) "1" else "0")
+    val instructions: List<Instruction> = initInstructionSet(INSTRUCTION_FILE)
+    val memory: IntArray = IntArray(MEMSIZE)
+
+    // Registers
+    var regPC = 0      ; private set // program counter
+    var regSP = SP_LOC ; private set // stack pointer
+    var regA  = 0      ; private set // accumulator
+    var regX  = 0      ; private set // register x
+    var regY  = 0      ; private set // register y
+
+    // Flags (Status Register)   NVUB DIZC
+    private var flagC = 0 ; private val maskC = (1 shl 0) // carry
+    private var flagZ = 0 ; private val maskZ = (1 shl 1) // zero
+    private var flagI = 0 ; private val maskI = (1 shl 2) // disable interrupt
+    private var flagD = 0 ; private val maskD = (1 shl 3) // decimal (BCD) mode
+    private var flagB = 0 ; private val maskB = (1 shl 4) // break command
+    private var flagU = 1 ; private val maskU = (1 shl 5) // unused
+    private var flagV = 0 ; private val maskV = (1 shl 6) // overflow
+    private var flagN = 0 ; private val maskN = (1 shl 7) // negative
+
+    // Helpers
+    var cycles = 0 ; private set
+    private var addrAbs = 0x0000
+    private var addrRel = 0x0000
+    private var temp = 0x0000
+    private var fetched = 0x00
+    private var opcode = 0
+
+    init {
+        log(true) // init log
+    }
+
+    // Reset to known state
+    fun reset(){
+        addrAbs = RESET_V
+        regPC = readWord(RESET_V)
+        regA = 0; regX = 0; regY = 0
+        regSP = SP_RESET
+        setStatus(0x00 or maskU)
+
+        addrRel = 0x0000
+        addrAbs = 0x0000
+        fetched = 0x00
+        cycles = 8
+    }
+
+    // Interrupt request
+    fun irq(){ // TODO DRY
+        if(flagI == 0){
+            // Push program counter and status flags to stack
+            pushStack((regPC ushr 8) and 0x00FF)
+            pushStack(regSP and 0x00FF)
+            flagB = 0; flagU = 1; flagI = 1
+            pushStack(getStatus())
+
+            // Read new pc location
+            addrAbs = IRQ_V
+            regPC = readWord(addrAbs)
+            cycles = 7
         }
-        regStatus = Integer.parseInt(bin,2).toUByte()
     }
 
-    override fun read(addr: UShort): UByte = this.bus.readFromRAM(addr)
+    // Non-maskable interrupt
+    fun nmi(){ // TODO DRY
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regSP and 0x00FF)
+        flagB = 0; flagU = 1; flagI = 1
+        pushStack(getStatus())
 
-    override fun write(addr: UShort, data: UByte): Boolean = this.bus.writeToRAM(addr, data)
-
-    override fun connectBus(bus: Bus){
-        bus.connectDevice(this)
+        addrAbs = NMI_V
+        regPC = readWord(addrAbs)
+        cycles = 8
     }
 
-    override fun disconnectBus() {
-        bus.disconnectDevice(this)
-    }
+    fun clock(){
+        if(cycles == 0){
+            opcode = readByte(regPC)
+            val instruction = getInstructionByOpcode(opcode)
+            flagU = 1
+            regPC++
 
-    fun complete() = cycles == 0U.toUByte()
-
-    fun tickClock(){
-        if(cycles == 0U.toUByte()){
-            opcode = read(pc)
-            setFlag("U", true)
-            pc++
-            cycles = instructions[opcode.toInt()].cycles.toUByte()
-            val moreClock1 = addressModeHandler(instructions[opcode.toInt()].addrMode)
-            val moreClock2 = instructionHandler(instructions[opcode.toInt()].impl)
-            cycles = (cycles + (moreClock1 and moreClock2).toUByte()).toUByte()
-            setFlag("U", true)
+            cycles = instruction.cycles
+            val addrCycles = addressingModeHandler(instruction.mode)
+            val opCycles = opcodeHandler(instruction.opcode)
+            cycles += (addrCycles and opCycles)
+            flagU = 1
         }
         cycles--
     }
 
-    private fun log(){
-        logData.add(mapOf(
-                "PC" to "%04x".format(pc.toInt()).toUpperCase(),
-                "OPCODE" to instructions[opcode.toInt()].mnemonic,
-                "ACC" to "%02x".format(regAcc.toInt()).toUpperCase(),
-                "X" to "%02x".format(regX.toInt()).toUpperCase(),
-                "Y" to "%02x".format(regY.toInt()).toUpperCase(),
-                "StkPtr" to "%02x".format(stkPtr.toInt()).toUpperCase(),
-                "C" to getFlag("C").toInt().toString(), "Z" to getFlag("Z").toInt().toString(),
-                "I" to getFlag("I").toInt().toString(), "D" to getFlag("D").toInt().toString(),
-                "B" to getFlag("B").toInt().toString(), "U" to getFlag("U").toInt().toString(),
-                "V" to getFlag("V").toInt().toString(), "N" to getFlag("N").toInt().toString()
-        ))
+    fun step(){
+        while(cycles > 0){
+            clock()
+        }
+        clock()
+        log()
     }
 
-    fun disassemble(start: UShort, end: UShort): MutableMap<UShort, String> {
-        var addr = start
-        var value: UByte
-        var lo: UByte
-        var hi: UByte
-        var disassembled: MutableMap<UShort, String> = mutableMapOf()
-        var lineAddr: UShort
-        var i = 0 //start
+    // Log general information of CPU state
+    fun log(init: Boolean = false, path: String = LOG_PATH){
+        if(!File(path).exists() || init){
+            File(path).printWriter().use{out ->
+                out.println("-".repeat(55))
+                out.println("OP    INS    A     X     Y     PC      SP     NVUBDIZC")
+                out.println("-".repeat(55))
+            }
+        } else {
+            File(path).appendText(showDebug() + "\n")
+        }
+    }
 
-        while(i.toUInt() <= end.toUInt()){//addr <= end){
+    // Log zero page and additional page
+    fun logMemory(page: Int, path: String = LOG_PATH){
+        var out = "\n" + "-".repeat(55) + " \n\n"
+        out += showPage(0x00) + "\n" + showPage(page)
+        File(path).appendText(out + "\n")
+    }
+
+    private fun fetch(): Int{
+        if(getInstructionByOpcode(opcode).mode != AddrMode.IMP){
+            fetched = readByte(addrAbs)
+        }
+        return fetched
+    }
+
+    private fun readByte(addr: Int): Int{  // TODO read from bus
+        if((addr >= 0x0000) and (addr <= 0xFFFF)) {
+            return memory[addr and 0xFFFF]
+        } else {
+            throw cpuError("Out of bounds, cannot read address '$addr'")
+        }
+    }
+    private fun readWord(addr: Int):Int = readByte(addr) or (readByte(addr + 1) shl 8)
+
+    private fun writeByte(addr: Int, data: Int){  // TODO write to bus
+        if((addr >= 0x0000) and (addr <= 0xFFFF)) {
+            memory[addr and 0xFFFF] = data
+        } else {
+            throw cpuError("Out of bounds, cannot write data '$data' to address '$addr'")
+        }
+    }
+
+    fun loadProgram(rom: List<Int>, pgmEntry: Int, resetHi: Int = 0x00, resetLo: Int = 0x80): Map<Int,Disassembly>{
+        if(pgmEntry < 0){
+            throw Exception("Program entry point '$pgmEntry' out of bounds. [0-$MEMSIZE]")
+        } else if((pgmEntry + rom.size) > MEMSIZE){
+            throw Exception("ROM size too large (${rom.size}) for entry point $pgmEntry")
+        }
+        rom.forEachIndexed{i,_ -> memory[i + pgmEntry] = rom[i] }
+        writeByte(RESET_V, resetHi)
+        writeByte(RESET_V+1, resetLo)
+        // TODO IRQ,NMI ?
+        val disassembly = disassemble()
+        return disassembly
+    }
+
+    // Disassemble memory within a range
+    fun disassemble(start: Int = 0x0000, stop: Int = 0xFFFF): Map<Int,Disassembly>{
+        val disassembled: MutableMap<Int,Disassembly> = mutableMapOf()
+        var addr = start; var lineAddr: Int
+
+        if(start > stop){
+            throw Exception("Cannot start at position greater than stopping position")
+        } else if(start < 0 || start > MEMSIZE){
+            throw Exception("Start position '$start' out of bounds")
+        } else if(stop < 0 || stop > MEMSIZE){
+            throw Exception("Stop position '$stop' out of bounds")
+        }
+        while(addr <= stop){
             lineAddr = addr
-            var instruction = "$%02x".format(addr.toInt()) + ": "
-            val opcode = read(addr.toUShort())
-            addr++
-            i++
+            val instruction = getInstructionByOpcode(readByte(addr))
+            val hex: MutableList<Int> = mutableListOf(instruction.opcode)
+            var asm = "$%04X ${instruction.mnemonic} ".format(addr++)
 
-            val addrMode = instructions[opcode.toInt()].addrMode
-            instruction += instructions[opcode.toInt()].mnemonic + " "
-            when (addrMode) {
-                "IMP" -> instruction += " {IMP}"
-                "IMM" -> {
-                    value = read(addr.toUShort())
-                    addr++
-                    instruction += "#$%02x".format(value.toInt()) + " {IMM}"
+            asm += when (instruction.mode) {
+                AddrMode.IMP -> ""
+                AddrMode.ACC -> ""
+                AddrMode.IMM -> {
+                    hex.add(readByte(addr++))
+                    "#$%02X".format(hex[1])
                 }
-                "ZP0" -> {
-                    lo = read(addr.toUShort())
-                    addr++
-                    instruction += "$%02x".format(lo.toInt()) + " {ZP0}"
+                AddrMode.ZP0 -> {
+                    hex.add(readByte(addr++))
+                    "$%02X".format(hex[1])
                 }
-                "ZPX" -> {
-                    lo = read(addr.toUShort())
-                    addr++
-                    instruction += "$%02x".format(lo.toInt()) + ", X {ZPX}"
+                AddrMode.ZPX -> {
+                    hex.add(readByte(addr++))
+                    "$%02X".format(hex[1]) + ", X"
                 }
-                "ZPY" -> {
-                    lo = read(addr.toUShort())
-                    addr++
-                    instruction += "$%02x".format(lo.toInt()) + " {ZPY}"
+                AddrMode.ZPY -> {
+                    hex.add(readByte(addr++))
+                    "$%02X".format(hex[1]) + ", Y"
                 }
-                "IZX" -> {
-                    lo = read(addr.toUShort())
-                    addr++
-                    instruction += "$%02x".format(lo.toInt()) + " {IZX}"
+                AddrMode.IZX -> {
+                    hex.add(readByte(addr++))
+                    "($%02X".format(hex[1]) + ", X)"
                 }
-                "IZY" -> {
-                    lo = read(addr.toUShort())
-                    addr++
-                    instruction += "$%02x".format(lo.toInt()) + " {IZY}"
+                AddrMode.IZY -> {
+                    hex.add(readByte(addr++))
+                    "($%02X".format(hex[1]) + ", Y)"
                 }
-                "ABS" -> {
-                    lo = read(addr.toUShort());
-                    addr++
-                    hi = read(addr.toUShort());
-                    addr++
-                    instruction += "$%04x".format(((hi shl 8).toUShort() or lo.toUShort()).toInt()) + " {ABS}"
+                AddrMode.ABS -> {
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1])
                 }
-                "ABX" -> {
-                    lo = read(addr.toUShort());
-                    addr++
-                    hi = read(addr.toUShort());
-                    addr++
-                    instruction += "$%04x".format(((hi shl 8).toUShort() or lo.toUShort()).toInt()) + " {ABX}"
+                AddrMode.ABX -> {
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1]) + ", X"
                 }
-                "ABY" -> {
-                    lo = read(addr.toUShort());
-                    addr++
-                    hi = read(addr.toUShort());
-                    addr++
-                    instruction += "$%04x".format(((hi shl 8).toUShort() or lo.toUShort()).toInt()) + " {ABY}"
+                AddrMode.ABY -> {
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "$%04X".format((hex[2] shl 8) or hex[1]) + ", Y"
                 }
-                "IND" -> {
-                    lo = read(addr.toUShort());
-                    addr++
-                    hi = read(addr.toUShort());
-                    addr++
-                    instruction += "$%04x".format(((hi shl 8).toUShort() or lo.toUShort()).toInt()) + " {IND}"
+                AddrMode.IND -> {
+                    hex.addAll(listOf(readByte(addr++), readByte(addr++)))
+                    "($%04X".format((hex[2] shl 8) or hex[1]) + ")"
                 }
-                "REL" -> {
-                    value = read(addr.toUShort());
-                    addr++
-                    instruction += "$%02x".format(value.toInt()) + " [$%04x".format((addr + value).toInt()) + "] {REL}"
+                AddrMode.REL -> {
+                    hex.add(readByte(addr++))
+                    "%02X [$%04X]".format(hex[1], addr + hex[1])
                 }
             }
-            disassembled[lineAddr] = instruction
+            disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(30, ' '),
+                instruction, hex.joinToString(" "){"%02X".format(it)})
         }
         return disassembled
     }
 
-    private fun fetch(): UByte {
-        if(instructions[opcode.toInt()].addrMode != "IMP"){
-            fetched = read(addrAbs)
-        }
-        return fetched
-    }
 
-    private fun addressModeHandler(addrMode: String): UByte{
-        return when(addrMode) {
-            "IMP" -> addrIMP();     "IMM" -> addrIMM();    "ZP0" -> addrZP0();    "ZPX" -> addrZPX()
-            "ZPY" -> addrZPY();     "REL" -> addrREL();    "ABS" -> addrABS();    "ABX" -> addrABX()
-            "ABY" -> addrABY();     "IND" -> addrIND();    "IZX" -> addrIZX();    "IZY" -> addrIZY()
-            else  -> 0U
-        }
-    }
-
-    private fun instructionHandler(impl: String): UByte{
-        val result = when(impl) {
-            "ADC" -> insADC();      "AND" -> insAND();      "ASL" -> insASL();      "BCC" -> insBCC()
-            "BCS" -> insBCS();      "BEQ" -> insBEQ();      "BIT" -> insBIT();      "BMI" -> insBMI()
-            "BNE" -> insBNE();      "BPL" -> insBPL();      "BRK" -> insBRK();      "BVC" -> insBVC()
-            "BVS" -> insBVS();      "CLC" -> insCLC();      "CLD" -> insCLD();      "CLI" -> insCLI()
-            "CLV" -> insCLV();      "CMP" -> insCMP();      "CPX" -> insCPX();      "CPY" -> insCPY()
-            "DEC" -> insDEC();      "DEX" -> insDEX();      "DEY" -> insDEY();      "EOR" -> insEOR()
-            "INC" -> insINC();      "INX" -> insINX();      "INY" -> insINY();      "JMP" -> insJMP()
-            "JSR" -> insJSR();      "LDA" -> insLDA();      "LDX" -> insLDX();      "LDY" -> insLDY()
-            "LSR" -> insLSR();      "NOP" -> insNOP();      "ORA" -> insORA();      "PHA" -> insPHA()
-            "PHP" -> insPHP();      "PLA" -> insPLA();      "PLP" -> insPLP();      "ROL" -> insROL()
-            "ROR" -> insROR();      "RTI" -> insRTI();      "RTS" -> insRTS();      "SBC" -> insSBC()
-            "SEC" -> insSEC();      "SED" -> insSED();      "SEI" -> insSEI();      "STA" -> insSTA()
-            "STX" -> insSTX();      "STY" -> insSTY();      "TAX" -> insTAX();      "TAY" -> insTAY()
-            "TSX" -> insTSX();      "TXA" -> insTXA();      "TXS" -> insTXS();      "TYA" -> insTYA()
-            else  -> insXXX()
-        }
-        val m = instructions[opcode.toInt()].mnemonic
-        if(pc.toInt() > 10) {
-            //println("executing instruction $m")
-        }
-        log()
-        return result
-    }
-
-    private fun storeRegister(value: UByte): UByte{
-        write(addrAbs, value)
-        return 0U
-    }
-
-    // Reset CPU state. Jumps to value at location 0xFFFC at compile
-    fun reset(){
-        addrAbs = 0xFFFCU
-        val lo = read((addrAbs + 0U).toUShort()).toUShort()
-        val hi = read((addrAbs + 1U).toUShort()).toUShort()
-        pc = (hi shl 8) or lo
-        regAcc = 0U
-        regX = 0U
-        regY = 0U
-        stkPtr = 0xFDU
-        regStatus = 0x00U.toUByte() or getFlag("U").toUByte()
-        addrRel = 0x0000U
-        addrAbs = 0x0000U
-        fetched = 0x00U
-
-        cycles = 8U
-    }
-
-    // Execute instruction at location 0xFFFE
-    fun interruptReq(){
-        if(!getFlag("I")){
-            write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
-            stkPtr--
-            write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
-            stkPtr--
-
-            setFlag("B", false)
-            setFlag("U", true)
-            setFlag("I", true)
-            write((0x0100U.toUShort() + stkPtr).toUShort(), regStatus)
-            stkPtr--
-
-            addrAbs = 0xFFFEU
-            val lo = read(addrAbs.plus(0U).toUShort()).toUShort()
-            val hi = read(addrAbs.plus(1U).toUShort()).toUShort()
-            pc = (hi shl 8) or lo
-
-            cycles = 7U
+    /******************************************** Instructions ***********************************************/
+    private fun opcodeHandler(opcode: Int): Int{
+        return when(getInstructionByOpcode(opcode).mnemonic){
+            "ADC" -> opADC();    "AND" -> opAND();    "ASL" -> opASL();    "BCC" -> opBCC()
+            "BCS" -> opBCS();    "BEQ" -> opBEQ();    "BIT" -> opBIT();    "BMI" -> opBMI()
+            "BNE" -> opBNE();    "BPL" -> opBPL();    "BRK" -> opBRK();    "BVC" -> opBVC()
+            "BVS" -> opBVS();    "CLC" -> opCLC();    "CLD" -> opCLD();    "CLI" -> opCLI()
+            "CLV" -> opCLV();    "CMP" -> opCMP();    "CPX" -> opCPX();    "CPY" -> opCPY()
+            "DEC" -> opDEC();    "DEX" -> opDEX();    "DEY" -> opDEY();    "EOR" -> opEOR()
+            "INC" -> opINC();    "INX" -> opINX();    "INY" -> opINY();    "JMP" -> opJMP()
+            "JSR" -> opJSR();    "LDA" -> opLDA();    "LDX" -> opLDX();    "LDY" -> opLDY()
+            "LSR" -> opLSR();    "NOP" -> opNOP();    "ORA" -> opORA();    "PHA" -> opPHA()
+            "PHP" -> opPHP();    "PLA" -> opPLA();    "PLP" -> opPLP();    "ROL" -> opROL()
+            "ROR" -> opROR();    "RTI" -> opRTI();    "RTS" -> opRTS();    "SBC" -> opSBC()
+            "SEC" -> opSEC();    "SED" -> opSED();    "SEI" -> opSEI();    "STA" -> opSTA()
+            "STX" -> opSTX();    "STY" -> opSTY();    "TAX" -> opTAX();    "TAY" -> opTAY()
+            "TSX" -> opTSX();    "TXA" -> opTXA();    "TXS" -> opTXS();    "TYA" -> opTYA()
+            else  -> opXXX()
         }
     }
 
-    // Execute instruction at location 0xFFFA, cannot be disabled
-    fun nmInterruptReq(){
-        write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FF.toUShort()).toUByte())
-        stkPtr--
-        write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FF.toUShort()).toUByte())
-        stkPtr--
-
-        setFlag("B", false)
-        setFlag("U", true)
-        setFlag("I", true)
-        write((0x0100U.toUByte() + stkPtr).toUShort(), regStatus)
-        stkPtr--
-
-        addrAbs = 0xFFFAU
-        val lo = read(addrAbs.plus(0U).toUShort()).toUShort()
-        val hi = read(addrAbs.plus(1U).toUShort()).toUShort()
-        pc = (hi shl 8) or lo
-        cycles = 8U
+    // Add with carry
+    private fun opADC():Int{
+        fetch()
+        temp = regA + fetched + flagC
+        flagC = if(temp > 255) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0) 1 else 0
+        flagV = if((((regA xor fetched).inv()) and (regA xor temp) and 0x0080) > 0) 1 else 0
+        flagN = if((temp and 0x80) > 0) 1 else 0
+        regA = temp and 0x00FF
+        return 1
     }
 
-
-
-    // Addressing Modes - http://www.obelisk.me.uk/6502/addressing.html
-
-    // Implied -> Target accumulator
-    private fun addrIMP(): UByte {
-        fetched = regAcc
-        return 0U
+    // Bitwise AND (with accumulator)
+    private fun opAND():Int{
+        fetch()
+        regA = regA and fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 1
     }
 
-    // Immediate -> Next byte as value, point address to next byte in instruction
-    private fun addrIMM(): UByte {
-        addrAbs = pc++
-        return 0U
-    }
-
-    // Zero Page -> Address location absolutely using only first 256 bytes of memory (1 byte address)
-    private fun addrZP0(): UByte {
-        addrAbs = read(pc++).toUShort().and(0x00FFU.toUShort())
-        return 0U
-    }
-
-    // Zero Page X -> Zero page addressing plus X register value as offset
-    private fun addrZPX(): UByte {
-        addrAbs = read(pc++).plus(regX).toUShort().and(0x00FFU.toUShort())
-        return 0U
-    }
-
-    // Zero Page Y -> Zero page addressing plus Y register value as offset
-    private fun addrZPY(): UByte {
-        addrAbs = read(pc++).plus(regY).toUShort().and(0x00FFU.toUShort())
-        return 0U
-    }
-
-    // Relative -> Address to branch from must be within 1byte relative offset (branch instructions)
-    private fun addrREL(): UByte {
-        addrRel = read(pc++).toUShort()
-        if(addrRel.and(0x80U.toUShort()) == 1U.toUShort()){
-            addrRel = addrRel.or(0xFF00U.toUShort())
-        }
-        return 0U
-    }
-
-    // Absolute -> Address using full 2 byte address
-    private fun addrABS(): UByte {
-        val lo = read(pc++).toUShort()
-        val hi = read(pc++).toUShort()
-        addrAbs = (hi shl 8) or lo
-        return 0U
-    }
-
-    // Absolute X -> absolute addressing with x register value as offset
-    private fun addrABX(): UByte {
-        val lo = read(pc++).toUShort()
-        val hi = read(pc++).toUShort()
-        addrAbs = (hi shl 8).or(lo).plus(regX).toUShort()
-        return if (addrAbs.and(0xFF00U.toUShort()) != (hi shl 8)) 1U else 0U
-    }
-
-    // Absolute Y -> absolute addressing with y register value as offset
-    private fun addrABY(): UByte {
-        val lo = read(pc++).toUShort()
-        val hi = read(pc++).toUShort()
-        addrAbs = (hi shl 8).or(lo).plus(regY).toUShort()
-        return if (addrAbs.and(0xFF00U.toUShort()) != (hi shl 8)) 1U else 0U
-    }
-
-    // Indirect -> use 2 byte address to get actual 2 byte address
-    private fun addrIND(): UByte {
-        val lo = read(pc++).toUShort()
-        val hi = read(pc++).toUShort()
-        val ptr = (hi shl 8).or(lo)
-        addrAbs = if(lo == 0x00FF.toUShort()){ // simulate page boundary hardware bug
-            (read((ptr.and(0xFF00U.toUShort())) shl 8)).or(read(ptr)).toUShort()
+    // Arithmetic Shift Left
+    private fun opASL():Int{
+        fetch()
+        temp = fetched shl 1
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((temp and 0x80) > 0) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
         } else {
-            (read(((ptr.plus(1U)) shl 8).toUShort())).or(read(ptr)).toUShort()
+            writeByte(addrAbs, temp and 0x00FF)
         }
-        return 0U
-    }
-
-    // Indirect X -> use 1 byte address plus x register value as offset for address on zero page
-    private fun addrIZX(): UByte {
-        val t = read(pc++).toUShort()
-        val lo = read((t + regX).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
-        val hi = read((t + regX + 1U).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
-        addrAbs = (hi shl 8).or(lo)
-        return 0U
-    }
-
-    // Indirect Y -> use 1 byte address plus y register value as offset for address on zero page
-    private fun addrIZY(): UByte {
-        val t = read(pc++).toUShort()
-        val lo = read(t.and(0x00FFU.toUShort())).toUShort()
-        val hi = read((t + 1U).toUShort() and(0x00FFU.toUShort()).toUShort()).toUShort()
-        addrAbs = (hi shl 8).or(lo).plus(regY).toUShort()
-        return if((addrAbs and(0xFF00U.toUShort())) == (hi shl 8)) 1U else 0U
-    }
-
-
-
-    // Instruction Helpers
-
-    private fun branchInstruction(condition: Boolean): UByte {
-        if(condition) {
-            cycles++
-            addrAbs = (pc + addrRel).toUShort()
-            if ((addrAbs and 0xFF00U.toUShort()).toUShort() != (pc and 0xFF00U.toUShort()).toUShort()) {
-                cycles++
-            }
-            println("!!!!!!!!! $addrAbs, $pc")
-            pc = addrAbs
-        }
-        return 0U
-    }
-
-    private fun updateFlag(f: String, v: Boolean): UByte {
-        setFlag(f, v)
-        return 0U
-    }
-
-    private fun compareRegister(reg: UByte): UByte{
-        fetch()
-        val regUShort = reg.toUShort()
-        val tmp = (regUShort - fetched.toUShort()).toUShort()
-        setFlag("C", regUShort >= fetched)
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
-        return 0U
-    }
-
-    private fun incrementRegister(reg: UByte, value: Int): UByte{
-        val regNew = (if(value > 0) (reg + value.toUByte()) else (reg - value.toUByte())).toUByte()
-        setFlag("Z", regNew == 0x00.toUByte())
-        setFlag("N", (regNew and 0x80U.toUByte()).equalsInt(1))
-        return regNew
-    }
-
-    private fun loadRegister(): UByte{
-        fetch()
-        setFlag("Z", fetched == 0x00.toUByte())
-        setFlag("N", (fetched and 0x80U.toUByte()).equalsInt(1))
-        return fetched
-    }
-
-
-
-    // Instructions
-
-    // Add with carry in
-    private fun insADC(): UByte {
-        fetch()
-        val tmp = (regAcc.toUShort() + fetched.toUShort() + getFlag("C").toUShort()).toUShort()
-        setFlag("C", tmp > 255U)
-        setFlag("Z", (tmp and 0x00FFU.toUShort()).equalsInt(0))
-        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
-        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U.toUShort()).equalsInt(1))
-        regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
-        return 1U
-    }
-
-    // Logical AND
-    private fun insAND(): UByte {
-        fetch()
-        regAcc = regAcc and fetched
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 1U
-    }
-
-    // Arithmetic shift left
-    private fun insASL(): UByte {
-        fetch()
-        val tmp = (fetched.toUShort() shl 1)
-        setFlag("C", (tmp and 0xFF00U.toUShort()) > 0U)
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
-        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
-        if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
-        } else {
-            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
-        }
-        return 0U
+        return 0
     }
 
     // Branch if carry clear
-    private fun insBCC() = branchInstruction(!getFlag("C"))
-
-    // Branch if carry set
-    private fun insBCS() = branchInstruction(getFlag("C"))
-
-    // Branch if equal
-    private fun insBEQ() = branchInstruction(getFlag("Z"))
-
-    // Bit test
-    private fun insBIT(): UByte {
-        fetch()
-        val tmp = (regAcc and fetched).toUShort()
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
-        setFlag("N", (fetched and ((1U shl 7).toUByte())).equalsInt(1))
-        setFlag("V", (fetched and ((1U shl 6).toUByte())).equalsInt(1))
-        return 0U
+    private fun opBCC():Int{
+        if(flagC == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
     }
 
-    // Branch if negative
-    private fun insBMI() = branchInstruction(getFlag("N"))
+    // Branch if carry set
+    private fun opBCS():Int{
+        if(flagC == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
-    // Branch if not equal
-    private fun insBNE() = branchInstruction(!getFlag("Z"))
+    // Branch if equal (zero set)
+    private fun opBEQ():Int{
+        if(flagZ == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
-    // Branch if positive
-    private fun insBPL() = branchInstruction(!getFlag("N"))
+    // Bit test
+    private fun opBIT():Int{
+        fetch()
+        temp = regA and fetched
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((fetched and (1 shl 7)) > 0) 1 else 0
+        flagV = if((fetched and (1 shl 6)) > 0) 1 else 0
+        return 0
+    }
 
-    // Program sourced interrupt
-    private fun insBRK(): UByte {
-        pc++
-        setFlag("I", true)
-        write((0x0100U.toUByte() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
-        stkPtr--
-        write((0x0100U.toUByte() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
-        stkPtr--
+    // Branch on minus (negative set)
+    private fun opBMI():Int{
+        if(flagN == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
-        setFlag("B", true)
-        write((0x0100U.toUByte() + stkPtr).toUShort(), regStatus)
-        stkPtr--
-        setFlag("B", false)
-        pc = (read(0xFFFEU.toUShort()).toUShort() or ((read(0xFFFFU.toUShort()).toUShort() shl 8).toUByte()).toUShort())
+    // Branch if not equal (zero clear)
+    private fun opBNE():Int{
+        if(flagZ == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
-        return 0U
+    // Branch if positive (negative clear)
+    private fun opBPL():Int{
+        if(flagN == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
+
+    // Break
+    private fun opBRK():Int{
+        regPC++
+        flagI = 1
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regPC and 0x00FF)
+        flagB = 1
+        pushStack(getStatus())
+        flagB = 0
+        regPC = readWord(IRQ_V)
+        return 0
     }
 
     // Branch if overflow clear
-    private fun insBVC() = branchInstruction(!getFlag("V"))
+    private fun opBVC():Int{
+        if(flagV == 0){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
     // Branch if overflow set
-    private fun insBVS() = branchInstruction(getFlag("V"))
+    private fun opBVS():Int{
+        if(flagV == 1){
+            cycles++
+            addrAbs = regPC + addrRel
+            if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
+                cycles++
+            }
+            regPC = addrAbs % MEMSIZE
+        }
+        return 0
+    }
 
-    // Clear carry flag
-    private fun insCLC() = updateFlag("C", false)
+    // Clear carry
+    private fun opCLC():Int{
+        flagC = 0
+        return 0
+    }
 
-    // Clear decimal flag
-    private fun insCLD() = updateFlag("D", false)
+    // Clear decimal
+    private fun opCLD():Int{
+        flagD = 0
+        return 0
+    }
 
-    // Disable interrupts, clear interrupt flag
-    private fun insCLI() = updateFlag("I", false)
+    // Clear interrupt
+    private fun opCLI():Int{
+        flagI = 0
+        return 0
+    }
 
-    // Clear overflow flag
-    private fun insCLV() = updateFlag("V", false)
+    // Clear overflow
+    private fun opCLV():Int{
+        flagV = 0
+        return 0
+    }
 
-    // Compare accumulator
-    private fun insCMP() = compareRegister(regAcc)
+    // Compare (with accumulator)
+    private fun opCMP():Int{
+        fetch()
+        temp = regA - fetched
+        flagC = if(regA >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        return 1
+    }
 
     // Compare X register
-    private fun insCPX() = compareRegister(regX)
+    private fun opCPX():Int{
+        fetch()
+        temp = regX - fetched
+        flagC = if(regX >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        return 0
+    }
 
     // Compare Y register
-    private fun insCPY() = compareRegister(regY)
-
-    // Decrement value at memory location
-    private fun insDEC(): UByte {
+    private fun opCPY():Int{
         fetch()
-        val tmp = (fetched - 1U).toUShort()
-        write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
-        return 0U
+        temp = regY - fetched
+        flagC = if(regY >= fetched) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        return 0
+    }
+
+    // Decrement (at memory location)
+    private fun opDEC():Int{
+        fetch()
+        temp = fetched - 1
+        writeByte(addrAbs, temp and 0x00FF)
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        return 0
     }
 
     // Decrement X register
-    private fun insDEX(): UByte {
-        regX = incrementRegister(regX, -1)
-        return 0U
+    private fun opDEX():Int{
+        regX--
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
+        return 0
     }
 
     // Decrement Y register
-    private fun insDEY(): UByte {
-        regY = incrementRegister(regY, -1)
-        return 0U
+    private fun opDEY():Int{
+        regY--
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // Logical Exclusive OR
-    private fun insEOR(): UByte {
+    // Bitwise XOR (with accumulator)
+    private fun opEOR():Int{
         fetch()
-        regAcc = regAcc xor fetched
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 1U
+        regA = regA xor fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 1
     }
 
-    // Increment value at memory location
-    private fun insINC(): UByte {
+    // Increment (at memory location)
+    private fun opINC():Int{
         fetch()
-        val tmp = (fetched + 1U).toUShort()
-        write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
-        return 0U
+        temp = fetched + 1
+        writeByte(addrAbs, temp and 0x00FF)
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        return 0
     }
 
     // Increment X register
-    private fun insINX(): UByte {
-        regX = incrementRegister(regX, 1)
-        return 0U
+    private fun opINX():Int{
+        regX++
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
+        return 0
     }
 
     // Increment Y register
-    private fun insINY(): UByte {
-        regY = incrementRegister(regY, 1)
-        return 0U
+    private fun opINY():Int{
+        regY++
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // Jump to location
-    private fun insJMP(): UByte {
-        pc = addrAbs
-        return 0U
+    // Jump
+    private fun opJMP():Int{
+        regPC = addrAbs
+        return 0
     }
 
     // Jump to subroutine
-    private fun insJSR(): UByte {
-        pc--
-        write((0x0100U.toUShort() + stkPtr).toUShort(), ((pc ushr 8) and 0x00FFU.toUShort()).toUByte())
-        stkPtr--
-        write((0x0100U.toUShort() + stkPtr).toUShort(), (pc and 0x00FFU.toUShort()).toUByte())
-        stkPtr--
-        pc = addrAbs
-        return 0U
+    private fun opJSR():Int{
+        regPC--
+        pushStack((regPC ushr 8) and 0x00FF)
+        pushStack(regPC and 0x00FF)
+        regPC = addrAbs
+        return 0
     }
 
     // Load accumulator
-    private fun insLDA(): UByte {
-        regAcc = loadRegister()
-        return 1U
+    private fun opLDA():Int{
+        fetch()
+        regA = fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 1
     }
 
     // Load X register
-    private fun insLDX(): UByte {
-        regX = loadRegister()
-        return 1U
+    private fun opLDX():Int{
+        fetch()
+        regX = fetched
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
+        return 1
     }
 
     // Load Y register
-    private fun insLDY(): UByte {
-        regY = loadRegister()
-        return 1U
+    private fun opLDY():Int{
+        fetch()
+        regY = fetched
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
+        return 1
     }
 
     // Logical Shift Right
-    private fun insLSR(): UByte {
+    private fun opLSR():Int{
         fetch()
-        setFlag("C", (fetched and 0x0001U.toUByte()).equalsInt(1))
-        val tmp = (fetched ushr 1).toUShort()
-        setFlag("Z", (tmp and 0x00FFU.toUShort()).toUShort() == 0x0000.toUShort())
-        if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
+        flagC = if((fetched and 0x0001) > 0) 1 else 0
+        temp = fetched ushr 1
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
         } else {
-            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
+            writeByte(addrAbs, temp and 0x00FF)
         }
-        return 0U
+        return 0
     }
 
-    // No operation. Not all NOPs are equal -> https://wiki.nesdev.com/w/index.php/CPU_unofficialopcodes
-    private fun insNOP(): UByte {
+    // No operation  (TODO add in illegal opcodes)
+    private fun opNOP():Int{
         return when(opcode){
-            0x1C.toUByte() -> 1U
-            0x3C.toUByte() -> 1U
-            0x5C.toUByte() -> 1U
-            0x7C.toUByte() -> 1U
-            0xDC.toUByte() -> 1U
-            0xFC.toUByte() -> 1U
-            else -> 0U
+            0x1C-> 1;   0x3C-> 1;   0x5C-> 1;   0x7C-> 1;
+            0xDC-> 1;   0xFC-> 1;   else-> 0
         }
     }
 
-    // Bitwise OR
-    private fun insORA(): UByte {
+    // Biwise OR (with accumulator)
+    private fun opORA():Int{
         fetch()
-        regAcc = regAcc or fetched
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 1U
+        regA = regA or fetched
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 1
     }
 
-    // Push accumulator to stack
-    private fun insPHA(): UByte {
-        write((0x0100U.toUShort() + stkPtr).toUShort(), regAcc)
-        stkPtr--
-        return 0U
+    // Push accumulator (to stack)
+    private fun opPHA():Int{
+        pushStack(regA)
+        return 0
     }
 
-    // Push status register to stack
-    private fun insPHP(): UByte {
-        stkPtr++
-        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
-        setFlag("U", true)
-        return 0U
+    // Push status register (to stack)
+    private fun opPHP():Int{
+        pushStack(getStatus() or maskB or maskU)
+        flagB = 0
+        flagU = 0
+        return 0
     }
 
-    // Pop accumulator off stack
-    private fun insPLA(): UByte {
-        stkPtr++
-        regAcc = read((0x0100U.toUByte() + stkPtr).toUShort())
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    // Pop accumulator (from stack)
+    private fun opPLA():Int{
+        regA = popStack()
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // Pop status register off stack
-    private fun insPLP(): UByte {
-        stkPtr++
-        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
-        setFlag("U", true)
-        return 0U
+    // Pop status register (from stack)
+    private fun opPLP():Int{
+        setStatus(popStack())
+        flagU = 1
+        return 0
     }
 
-    // Rotate left
-    private fun insROL(): UByte {
+    // Rotate Left
+    private fun opROL():Int{
         fetch()
-        val tmp = (fetched shl 1).toUShort() or getFlag("C").toUShort()
-        setFlag("C", (tmp and 0xFF00U.toUShort()).equalsInt(1))
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x0000.toUShort())
-        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
-        if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
-        } else {
-            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
+        temp = (fetched shl 1) or flagC
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else{
+            writeByte(addrAbs, temp and 0x00FF)
         }
-        return 0U
+        return 0
     }
 
-    // Rotate right
-    private fun insROR(): UByte {
+    // Rotate Right
+    private fun opROR():Int{
         fetch()
-        val tmp = (getFlag("C").toUByte() shl 7).toUShort() or ((fetched ushr 1).toUShort())
-        setFlag("C", (fetched and 0x01U.toUByte()).equalsInt(1))
-        setFlag("Z", (tmp and 0x00FFU.toUShort()) == 0x00.toUShort())
-        setFlag("N", (tmp and 0x0080U.toUShort()).equalsInt(1))
-        if(instructions[opcode.toInt()].addrMode == "IMP"){
-            regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
-        } else {
-            write(addrAbs, (tmp and 0x00FFU.toUShort()).toUByte())
+        temp = (flagC shl 7) or (fetched ushr 1)
+        flagC = if((fetched and 0x01) > 0) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
+            regA = temp and 0x00FF
+        } else{
+            writeByte(addrAbs, temp and 0x00FF)
         }
-        return 0U
+        return 0
     }
 
     // Return from interrupt
-    private fun insRTI(): UByte {
-        stkPtr++
-        regStatus = read((0x0100U.toUByte() + stkPtr).toUShort())
-        regStatus = regStatus and getFlag("B").toUByte().inv()
-        regStatus = regStatus and getFlag("U").toUByte().inv()
-
-        stkPtr++
-        pc = read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort()
-        stkPtr++
-        pc = pc or (read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort() shl 8)
-        return 0U
+    private fun opRTI():Int{
+        setStatus(popStack())
+        setStatus((getStatus() and maskB.inv()))
+        setStatus((getStatus() and maskU.inv()))
+        regPC = popStack() or (popStack() shl 8)
+        return 0
     }
 
     // Return from subroutine
-    private fun insRTS(): UByte {
-        stkPtr++
-        pc = read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort()
-        stkPtr++
-        pc = pc or (read((0x0100U.toUByte() + stkPtr).toUShort()).toUShort() shl 8)
-        pc++
-        return 0U
+    private fun opRTS():Int{
+        regPC = popStack() or (popStack() shl 8)
+        regPC++
+        return 0
     }
 
-    // Subtract with borrow in
-    private fun insSBC(): UByte {
+    // Subtract with carry
+    private fun opSBC():Int{
         fetch()
-        val value = fetched.toUShort() xor 0x00FFU.toUShort()
-        val tmp = (regAcc.toUShort() + value + getFlag("C").toUShort()).toUShort()
-        setFlag("C", tmp > 255U)
-        setFlag("Z", (tmp and 0x00FFU.toUShort()).equalsInt(0))
-        setFlag("N", (tmp and 0x80U.toUShort()).equalsInt(1))
-        setFlag("V", (((regAcc.toUShort() xor fetched.toUShort()).inv()) and (regAcc.toUShort() xor tmp) and 0x0080U.toUShort()).equalsInt(1))
-        regAcc = (tmp and 0x00FFU.toUShort()).toUByte()
-        return 1U
+        val value = fetched xor 0x00FF
+        temp = regA + value + flagC
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
+        flagZ = if((temp and 0x00FF) == 0) 1 else 0
+        flagV = if(((temp xor regA) and (temp xor value) and 0x0080) > 0) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
+        regA = temp and 0x00FF
+        return 1
     }
 
-    // Set carry flag
-    private fun insSEC() = updateFlag("C", true)
+    // Set carry
+    private fun opSEC():Int{
+        flagC = 1
+        return 0
+    }
 
-    // Set decimal flag
-    private fun insSED() = updateFlag("D", true)
+    // Set decimal
+    private fun opSED():Int{
+        flagD = 1
+        return 0
+    }
 
-    // Set interrupt flag / enable interrupts
-    private fun insSEI() = updateFlag("I", true)
+    // Set interrupt
+    private fun opSEI():Int{
+        flagI = 1
+        return 0
+    }
 
-    // Store accumulator at address
-    private fun insSTA() = storeRegister(regAcc)
+    // Store accumulator (at address)
+    private fun opSTA():Int{
+        writeByte(addrAbs, regA)
+        return 0
+    }
 
-    // Store register x at address
-    private fun insSTX() = storeRegister(regX)
+    // Store X register (at address)
+    private fun opSTX():Int{
+        writeByte(addrAbs, regX)
+        return 0
+    }
 
-    // Store register y at address
-    private fun insSTY() = storeRegister(regY)
+    // Store Y register (at address)
+    private fun opSTY():Int{
+        writeByte(addrAbs, regY)
+        return 0
+    }
 
     // Transfer accumulator to X register
-    private fun insTAX(): UByte {
-        regX = regAcc
-        setFlag("Z", regX == 0x00.toUByte())
-        setFlag("N", (regX and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    private fun opTAX():Int{
+        regX = regA
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
+        return 0
     }
 
     // Transfer accumulator to Y register
-    private fun insTAY(): UByte {
-        regY = regAcc
-        setFlag("Z", regY == 0x00.toUByte())
-        setFlag("N", (regY and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    private fun opTAY():Int{
+        regY = regA
+        flagZ = if(regY == 0x00) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // Transfer stack point to X register
-    private fun insTSX(): UByte {
-        regX = stkPtr
-        setFlag("Z", regX == 0x00.toUByte())
-        setFlag("N", (regY and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    // Transfer stack pointer to X register
+    private fun opTSX():Int{
+        regX = regSP
+        flagZ = if(regX == 0x00) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // Transfer X register to accumulator
-    private fun insTXA(): UByte {
-        regAcc = regX
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    // Transfer X register to Accumulator
+    private fun opTXA():Int{
+        regA = regX
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 0
     }
 
     // Transfer X register to stack pointer
-    private fun insTXS(): UByte {
-        stkPtr = regX
-        return 0U
+    private fun opTXS():Int{
+        regSP = regX
+        return 0
     }
 
-    // Transfer Y register to accumulator
-    private fun insTYA(): UByte {
-        regAcc = regY
-        setFlag("Z", regAcc == 0x00.toUByte())
-        setFlag("N", (regAcc and 0x80U.toUByte()).equalsInt(1))
-        return 0U
+    // Transfer Y register to Accumulator
+    private fun opTYA():Int{
+        regA = regY
+        flagZ = if(regA == 0x00) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
+        return 0
     }
 
-    // illegal opcodes caught here
-    private fun insXXX() = 0U.toUByte()
+    // Illegal opcodes
+    private fun opXXX():Int{
+        return 0
+        //throw cpuError("Illegal opcode encountered")
+    }
+
+    /****************************************** Addressing Modes *********************************************/
+    private fun addressingModeHandler(mode: AddrMode): Int{
+        return when(mode){
+            AddrMode.IMM -> addrIMM();    AddrMode.ABS -> addrABS();    AddrMode.ZP0 -> addrZP0()
+            AddrMode.ABX -> addrABX();    AddrMode.ABY -> addrABY();    AddrMode.ZPX -> addrZPX()
+            AddrMode.ZPY -> addrZPY();    AddrMode.IZX -> addrIZX();    AddrMode.IZY -> addrIZY()
+            AddrMode.REL -> addrREL();    AddrMode.IMP -> addrIMP();    AddrMode.ACC -> addrACC()
+            AddrMode.IND -> addrIND()
+        }
+    }
+
+    private fun addrIMM(): Int{
+        addrAbs = regPC++
+        return 0
+    }
+
+    private fun addrABS(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+        addrAbs = (hi shl 8) or lo
+        return 0
+    }
+
+    private fun addrZP0(): Int{
+        addrAbs = readByte(regPC)
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrABX(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regX
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0 // page boundary
+    }
+
+    private fun addrABY(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regY
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0 // page boundary
+    }
+
+    private fun addrZPX(): Int{
+        addrAbs = readByte(regPC) + regX
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrZPY(): Int{
+        addrAbs = readByte(regPC) + regY
+        regPC++
+        addrAbs = addrAbs and 0x00FF
+        return 0
+    }
+
+    private fun addrIZX(): Int{
+        val t = readByte(regPC)
+        regPC++
+        val lo = readByte((t + regX) and 0x00FF)
+        val hi = readByte((t + regX + 1) and 0x00FF)
+        addrAbs = (hi shl 8) or lo
+        return 0
+    }
+
+    private fun addrIZY(): Int{
+        val t = readByte(regPC)
+        regPC++
+        val lo = readByte(t and 0x00FF)
+        val hi = readByte((t + 1) and 0x00FF)
+        addrAbs = (hi shl 8) or lo
+        addrAbs += regY
+        return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0
+    }
+
+    // address must be within -128 to +127 of branch instruction
+    private fun addrREL(): Int{
+        addrRel = readByte(regPC)
+        regPC++
+        if((addrRel and 0x80) > 0){
+            addrRel = addrRel or 0xFF00
+        }
+        return 0
+    }
+
+    private fun addrIMP(): Int{
+        fetched = regA
+        return 0
+    }
+
+    private fun addrACC(): Int{
+        fetched = regA
+        return 0
+    }
+
+    private fun addrIND(): Int{
+        val lo = readByte(regPC)
+        regPC++
+        val hi = readByte(regPC)
+        regPC++
+        val addr = (hi shl 8) or lo
+        addrAbs = if(lo == 0x00FF){  // Simulate page boundary bug
+            (readByte(addr and 0xFF00) shl 8) or readByte(addr)
+        } else {
+            (readByte(addr + 1) shl 8) or readByte(addr)
+        }
+        return 0
+    }
 
 
+    /****************************************** Stack and Status *********************************************/
+    private fun peekStack(): Int{
+        return memory[regSP + SP_LOC]
+    }
+
+    private fun pokeStack(data: Int){
+        memory[regSP + SP_LOC] = data
+    }
+
+    private fun pushStack(data: Int){
+        writeByte(regSP + SP_LOC, data)
+        regSP--
+    }
+
+    private fun popStack(): Int{
+        regSP++
+        return readByte(regSP + SP_LOC)
+    }
+
+    // Flags to status register conversions
+    fun getStatus() = (flagC shl 0) or (flagZ shl 1) or (flagI shl 2) or (flagD shl 3) or
+            (flagB shl 4) or (flagU shl 5) or (flagV shl 6) or (flagN shl 7) or 0
+
+    fun setStatus(status: Int){
+        flagC = 1 and (status ushr 0); flagZ = 1 and (status ushr 1)
+        flagI = 1 and (status ushr 2); flagD = 1 and (status ushr 3)
+        flagB = 1 and (status ushr 4); flagU = 1 and (status ushr 5)
+        flagV = 1 and (status ushr 6); flagN = 1 and (status ushr 7)
+    }
+
+
+    /************************************************* Utils *************************************************/
+    fun getFlag(f: String): Int{
+        return when(f.toUpperCase()){
+            "N"-> flagN;   "V"-> flagV;   "U"-> flagU;   "B"-> flagB
+            "D"-> flagD;   "I"-> flagI;   "Z"-> flagZ;   "C"-> flagC
+            else -> throw cpuError("'$f' is not a valid flag [N,V,U,B,D,I,Z,C]")
+        }
+    }
+
+    fun showDebug(): String {
+        return "%02X    %s    %02X    %02X    %02X    %04X    %02X    ".format(
+                opcode, getInstructionByOpcode(opcode).mnemonic, regA, regX, regY, regPC, regSP) +
+                " ${getStatus().toString(2).padStart(8,'0')}"
+    }
+
+    fun showPage(page: Int = 0): String {
+        var out = ""
+        for(i in 0..15) {
+            var line = "$%04X:  ".format((i * 16) + page)
+            for (j in 0..15) {
+                line += "%02X ".format(memory[((i * 16) + j) + page])
+            }
+            out += line + "\n"
+        }
+        return out
+    }
+
+    fun peek(addr: Int) = memory[addr] // Read memory with no cycle
+    fun wipeMemory() = memory.forEachIndexed{i,_ -> memory[i] = 0x00}
+
+    private fun getInstructionByOpcode(opcode: Int): Instruction = instructions.find {it.opcode == opcode} ?: throw cpuError("Invalid opcode '$opcode'")
+    private fun getAddrModeByOpcode(opcode: Int) = getInstructionByOpcode(opcode).mode
+    private fun cpuError(msg: String): CpuException = CpuException(msg, opcode, getStatus())
+
+    private fun initInstructionSet(fileName: String): List<Instruction>{
+        val instructions : MutableList<Instruction> = mutableListOf()
+        val fileReader = BufferedReader(InputStreamReader(this.javaClass.getResourceAsStream("/$fileName")))
+        val csvReader = CSVReaderBuilder(fileReader).withSkipLines(1).build()
+        try{
+            csvReader.readAll().forEach{record ->
+                instructions.add(Instruction(record[0].toUpperCase(), record[1].toInt(16),
+                    AddrMode.valueOf(record[2].toUpperCase()), record[3].toInt()))
+            }
+        } catch(e: Exception){
+            println("Error loading instructions.")
+            e.printStackTrace()
+        } finally{
+            fileReader.close()
+            csvReader!!.close()
+        }
+        return instructions
+    }
 }
-
-
-
-// Extension Methods
-
-private fun Boolean.toInt() = if(this) 1 else 0
-
-@ExperimentalUnsignedTypes
-private infix fun UShort.shl(i: Int) = ((this.toInt()) shl i).toUShort()
-
-@ExperimentalUnsignedTypes
-private infix fun UShort.ushr(i: Int) = ((this.toInt()) ushr i).toUShort()
-
-@ExperimentalUnsignedTypes
-private infix fun UByte.shl(i: Int) = ((this.toInt()) shl i).toUByte()
-
-@ExperimentalUnsignedTypes
-private infix fun UByte.ushr(i: Int) = ((this.toInt()) ushr i).toUByte()
-
-@ExperimentalUnsignedTypes
-private fun UByte.equalsInt(i: Int) = this.toInt() == i
-
-@ExperimentalUnsignedTypes
-private fun UShort.equalsInt(i: Int) = this.toInt() == i
-
-@ExperimentalUnsignedTypes
-private fun Boolean.toUShort() = if (this) 1U.toUShort() else 0U.toUShort()
-
-@ExperimentalUnsignedTypes
-private fun Boolean.toUByte() = if (this) 1U.toUByte() else 0U.toUByte()
