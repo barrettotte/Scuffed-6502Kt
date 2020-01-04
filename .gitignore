@@ -9,3 +9,5 @@ bin/
 out/
 .vscode/
 *.jar
+
+dump.txt

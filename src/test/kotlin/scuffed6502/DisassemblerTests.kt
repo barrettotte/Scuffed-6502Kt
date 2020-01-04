@@ -42,6 +42,7 @@ class DissassemblerTests {
                 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA)
         val da = cpu.loadProgram(pgm, entry)
         outputDisassembly("./disassembly.txt", da, entry, entry + 27)
+        dumpMemory("./dump.txt", cpu.memory, entry, entry + 32)
 
         assertEquals(32768, da.size)
 
@@ -70,6 +71,17 @@ class DissassemblerTests {
             memory.forEach{(k,v) ->
                 if(k in start..end){
                     out.println("${k.toString().padStart(5, '0')}     $v ")
+                }
+            }
+        }
+    }
+
+    private fun dumpMemory(path: String, memory: IntArray, start: Int = 0, end: Int = 65535){
+        File(path).printWriter().use { out ->
+            memory.forEachIndexed{idx, byte ->
+                if(idx in start..end){
+                    out.println("${idx.toString(16).padStart(4, '0').toUpperCase()}     " +
+                            "0x${byte.toString(16).padStart(2,'0')}")
                 }
             }
         }

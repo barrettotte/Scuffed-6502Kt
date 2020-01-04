@@ -26,9 +26,9 @@ class CpuTests {
 
     @Test
     fun test_cpuInit(){
-        assertEquals(256, cpu.getInstructionSet().size)
+        assertEquals(256, cpu.instructions.size)
         assertEquals(32, cpu.getStatus()) // U flag active still 00100000
-        assertEquals(65536, cpu.getMemory().size)
+        assertEquals(65536, cpu.memory.size)
     }
 
     @Test
@@ -50,6 +50,13 @@ class CpuTests {
         assertEquals(0, cpu.getFlag("Z"))
         assertEquals(0, cpu.getFlag("C"))
         assertThrows<CpuException>{cpu.getFlag("X")}
+    }
+
+    @Test
+    fun test_wipeMemory(){
+        cpu.wipeMemory()
+        val comp = IntArray(0x10000)
+        cpu.memory.forEachIndexed{idx,byte -> assertEquals(comp[idx], byte)}
     }
 
 }

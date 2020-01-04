@@ -1,6 +1,7 @@
 package scuffed6502
 
 import com.opencsv.CSVReaderBuilder
+import com.sun.org.apache.xpath.internal.operations.Bool
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -17,32 +18,32 @@ class Cpu {
         private const val SP_RESET  = 0xFD                      //
     }
 
-    private val instructions: List<Instruction> = initInstructionSet(INSTRUCTION_FILE)
-    private val memory: IntArray = IntArray(MEMSIZE)
+    val instructions: List<Instruction> = initInstructionSet(INSTRUCTION_FILE)
+    val memory: IntArray = IntArray(MEMSIZE)
 
     // Registers
-    private var regPC = 0        // program counter
-    private var regSP = SP_LOC   // stack pointer
-    private var regA  = 0        // accumulator
-    private var regX  = 0        // register x
-    private var regY  = 0        // register y
+    var regPC = 0      ; private set // program counter
+    var regSP = SP_LOC ; private set // stack pointer
+    var regA  = 0      ; private set // accumulator
+    var regX  = 0      ; private set // register x
+    var regY  = 0      ; private set // register y
 
     // Flags (Status Register)   NVUB DIZC
-    private var flagC = 0;  private val maskC = (1 shl 0) // carry
-    private var flagZ = 0;  private val maskZ = (1 shl 1) // zero
-    private var flagI = 0;  private val maskI = (1 shl 2) // disable interrupt
-    private var flagD = 0;  private val maskD = (1 shl 3) // decimal (BCD) mode
-    private var flagB = 0;  private val maskB = (1 shl 4) // break command
-    private var flagU = 1;  private val maskU = (1 shl 5) // unused
-    private var flagV = 0;  private val maskV = (1 shl 6) // overflow
-    private var flagN = 0;  private val maskN = (1 shl 7) // negative
+    private var flagC = 0 ; private val maskC = (1 shl 0) // carry
+    private var flagZ = 0 ; private val maskZ = (1 shl 1) // zero
+    private var flagI = 0 ; private val maskI = (1 shl 2) // disable interrupt
+    private var flagD = 0 ; private val maskD = (1 shl 3) // decimal (BCD) mode
+    private var flagB = 0 ; private val maskB = (1 shl 4) // break command
+    private var flagU = 1 ; private val maskU = (1 shl 5) // unused
+    private var flagV = 0 ; private val maskV = (1 shl 6) // overflow
+    private var flagN = 0 ; private val maskN = (1 shl 7) // negative
 
     // Helpers
+    var cycles = 0 ; private set
     private var addrAbs = 0x0000
     private var addrRel = 0x0000
     private var temp = 0x0000
     private var fetched = 0x00
-    private var cycles = 0
     private var opcode = 0
 
 
@@ -104,6 +105,13 @@ class Cpu {
         cycles--
     }
 
+    fun step(){
+        while(cycles > 0){
+            clock()
+        }
+        clock()
+    }
+
     private fun fetch(): Int{
         if(getInstructionByOpcode(opcode).mode != AddrMode.IMP){
             fetched = readByte(addrAbs)
@@ -138,13 +146,12 @@ class Cpu {
         writeByte(RESET_V, resetHi)
         writeByte(RESET_V+1, resetLo)
         // TODO IRQ,NMI ?
-        val disassembly = disassemble(0x0000, 0xFFFF)
-        reset()
+        val disassembly = disassemble()
         return disassembly
     }
 
     // Disassemble memory within a range
-    fun disassemble(start: Int, stop: Int): Map<Int,Disassembly>{
+    fun disassemble(start: Int = 0x0000, stop: Int = 0xFFFF): Map<Int,Disassembly>{
         val disassembled: MutableMap<Int,Disassembly> = mutableMapOf()
         var addr = start; var lineAddr: Int
 
@@ -159,7 +166,7 @@ class Cpu {
             lineAddr = addr
             val instruction = getInstructionByOpcode(readByte(addr))
             val hex: MutableList<Int> = mutableListOf(instruction.opcode)
-            var asm = "$%04X".format(addr++) + "     ${instruction.mnemonic} "
+            var asm = "$%04X ${instruction.mnemonic} ".format(addr++)
 
             asm += when (instruction.mode) {
                 AddrMode.IMP -> ""
@@ -206,7 +213,7 @@ class Cpu {
                 }
                 AddrMode.REL -> {
                     hex.add(readByte(addr++))
-                    "%02X".format(hex[1]) + "  " + "%02X".format(addr) + "  ${"%04X".format(addr + hex[1])}"
+                    "%02X [$%04X]".format(hex[1], addr + hex[1])
                 }
             }
             disassembled[lineAddr] = Disassembly(lineAddr, asm.padEnd(30, ' '),
@@ -761,7 +768,8 @@ class Cpu {
 
     // Illegal opcodes
     private fun opXXX():Int{
-        throw cpuError("Illegal opcode encountered")
+        return 0
+        //throw cpuError("Illegal opcode encountered")
     }
 
 
@@ -920,17 +928,19 @@ class Cpu {
     }
 
 
-    /****************************************** Utils and Accessors ******************************************/
-    fun getInstructionSet() = instructions
-    fun getMemory() = memory
-    fun getCycles() = cycles
-
+    /************************************************* Utils *************************************************/
     fun getFlag(f: String): Int{
         return when(f.toUpperCase()){
             "N"-> flagN;   "V"-> flagV;   "U"-> flagU;   "B"-> flagB
             "D"-> flagD;   "I"-> flagI;   "Z"-> flagZ;   "C"-> flagC
             else -> throw cpuError("'$f' is not a valid flag [N,V,U,B,D,I,Z,C]")
         }
+    }
+
+    fun showDebug(): String {
+        return "%02X    %s    %02X    %02X    %02X    %04X    %02X    ".format(
+                opcode, getInstructionByOpcode(opcode).mnemonic, regA, regX, regY, regPC, regSP) +
+                " ${getStatus().toString(2).padStart(8,'0')}"
     }
 
     fun peek(addr: Int) = memory[addr] // Read memory with no cycle
