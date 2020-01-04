@@ -43,46 +43,44 @@ class EmulatorTests {
         cpu.reset()
         cpu.step() // process CPU reset (8 cycles)
 
-        println("-----------------------------------------------------------------------")
-        println("OP    INS    A     X     Y     PC      SP     STATUS  [NVUBDIZC]")
-        println("-----------------------------------------------------------------------")
-
-        cpu.step()                                      // LDX #$0A
+        cpu.step() // LDX #$0A
         assertEquals(0x0A, cpu.regX)
 
-        cpu.step()                                      // STX $0000
+        cpu.step() // STX $0000
         assertEquals(0x0A, cpu.memory[0x0000])
 
-        cpu.step()                                      // LDX #$03
+        cpu.step() // LDX #$03
         assertEquals(0x03, cpu.regX)
 
-        cpu.step()                                      // STX $0001
+        cpu.step() // STX $0001
         assertEquals(0x03, cpu.memory[0x0001])
 
-        cpu.step()                                      // LDY $0000
+        cpu.step() // LDY $0000
         assertEquals(0x0A, cpu.regY)
 
-        cpu.step()                                      // LDA #$00
+        cpu.step() // LDA #$00
         assertEquals(0x00, cpu.regA)
         assertEquals(1, cpu.getFlag("Z"))
 
-        cpu.step()                                      // CLC
+        cpu.step() // CLC
         assertEquals(0, cpu.getFlag("C"))
 
-        println(cpu.showDebug())
-        cpu.step()
-        assertEquals(0x03, cpu.regA)            // ADC $0001
-
-        println(cpu.showDebug())
-        cpu.step()
-        assertEquals(0x09, cpu.regY)            // DEY
-
-        println(cpu.showDebug())
-        cpu.step()                                      // BNE loop
-
-        for (i in 0..10) {
-            println(cpu.showDebug())
-            cpu.step()
+        // loop  (calculating 10 * 3)
+        for(i in 1..10) {
+            cpu.step() // ADC $0001
+            assertEquals(0x03 * i, cpu.regA)
+            cpu.step() // DEY
+            assertEquals(0x0A - i, cpu.regY)
+            cpu.step() // BNE loop
         }
+        assertEquals(0x1E, cpu.regA)
+        cpu.step() // STA $0002
+        assertEquals(0x1E, cpu.memory[0x0002])
+
+        cpu.step() // NOP
+        cpu.step() // NOP
+        cpu.step() // NOP
+
+        cpu.logMemory(0x8000)
     }
 }

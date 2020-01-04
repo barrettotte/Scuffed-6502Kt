@@ -3,6 +3,7 @@ package scuffed6502
 import com.opencsv.CSVReaderBuilder
 import com.sun.org.apache.xpath.internal.operations.Bool
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 
 @Suppress("SameParameterValue")
@@ -10,12 +11,13 @@ class Cpu {
 
     companion object {
         private const val INSTRUCTION_FILE = "instructions.csv" // /resources/instructions.csv
+        private const val LOG_PATH  = "log.txt"                 //
         private const val MEMSIZE   = 0x10000                   // 65536; ram, audio, graphics, IO sections
         private const val SP_LOC    = 0x100                     // location of stack in memory
         private const val RESET_V   = 0xFFFC                    // Reset vector
         private const val IRQ_V     = 0xFFFE                    // IRQ vector
         private const val NMI_V     = 0xFFFA                    // NMI vector
-        private const val SP_RESET  = 0xFD                      //
+        private const val SP_RESET  = 0xFD                      // Stack pointer reset location
     }
 
     val instructions: List<Instruction> = initInstructionSet(INSTRUCTION_FILE)
@@ -46,6 +48,9 @@ class Cpu {
     private var fetched = 0x00
     private var opcode = 0
 
+    init {
+        log(true) // init log
+    }
 
     // Reset to known state
     fun reset(){
@@ -110,6 +115,27 @@ class Cpu {
             clock()
         }
         clock()
+        log()
+    }
+
+    // Log general information of CPU state
+    fun log(init: Boolean = false, path: String = LOG_PATH){
+        if(!File(path).exists() || init){
+            File(path).printWriter().use{out ->
+                out.println("-".repeat(55))
+                out.println("OP    INS    A     X     Y     PC      SP     NVUBDIZC")
+                out.println("-".repeat(55))
+            }
+        } else {
+            File(path).appendText(showDebug() + "\n")
+        }
+    }
+
+    // Log zero page and additional page
+    fun logMemory(page: Int, path: String = LOG_PATH){
+        var out = "\n" + "-".repeat(55) + " \n\n"
+        out += showPage(0x00) + "\n" + showPage(page)
+        File(path).appendText(out + "\n")
     }
 
     private fun fetch(): Int{
@@ -250,8 +276,8 @@ class Cpu {
         temp = regA + fetched + flagC
         flagC = if(temp > 255) 1 else 0
         flagZ = if((temp and 0x00FF) == 0) 1 else 0
-        flagV = if((((regA xor fetched).inv()) and (regA xor temp) and 0x0080) == 1) 1 else 0
-        flagN = if((temp and 0x80) == 1) 1 else 0
+        flagV = if((((regA xor fetched).inv()) and (regA xor temp) and 0x0080) > 0) 1 else 0
+        flagN = if((temp and 0x80) > 0) 1 else 0
         regA = temp and 0x00FF
         return 1
     }
@@ -261,7 +287,7 @@ class Cpu {
         fetch()
         regA = regA and fetched
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 1
     }
 
@@ -271,7 +297,7 @@ class Cpu {
         temp = fetched shl 1
         flagC = if((temp and 0xFF00) > 0) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
-        flagN = if((temp and 0x80) == 1) 1 else 0
+        flagN = if((temp and 0x80) > 0) 1 else 0
         if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
             regA = temp and 0x00FF
         } else {
@@ -288,7 +314,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -301,7 +327,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -314,7 +340,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -324,8 +350,8 @@ class Cpu {
         fetch()
         temp = regA and fetched
         flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
-        flagN = if((fetched and (1 shl 7)) == 1) 1 else 0
-        flagV = if((fetched and (1 shl 6)) == 1) 1 else 0
+        flagN = if((fetched and (1 shl 7)) > 0) 1 else 0
+        flagV = if((fetched and (1 shl 6)) > 0) 1 else 0
         return 0
     }
 
@@ -337,7 +363,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -350,7 +376,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -363,7 +389,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -389,7 +415,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -402,7 +428,7 @@ class Cpu {
             if((addrAbs and 0xFF00) != (regPC and 0xFF00)){
                 cycles++
             }
-            regPC = addrAbs
+            regPC = addrAbs % MEMSIZE
         }
         return 0
     }
@@ -437,7 +463,7 @@ class Cpu {
         temp = regA - fetched
         flagC = if(regA >= fetched) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         return 1
     }
 
@@ -447,7 +473,7 @@ class Cpu {
         temp = regX - fetched
         flagC = if(regX >= fetched) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         return 0
     }
 
@@ -457,7 +483,7 @@ class Cpu {
         temp = regY - fetched
         flagC = if(regY >= fetched) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         return 0
     }
 
@@ -467,7 +493,7 @@ class Cpu {
         temp = fetched - 1
         writeByte(addrAbs, temp and 0x00FF)
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         return 0
     }
 
@@ -475,7 +501,7 @@ class Cpu {
     private fun opDEX():Int{
         regX--
         flagZ = if(regX == 0x00) 1 else 0
-        flagN = if((regX and 0x80) == 1) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -483,7 +509,7 @@ class Cpu {
     private fun opDEY():Int{
         regY--
         flagZ = if(regY == 0x00) 1 else 0
-        flagN = if((regY and 0x80) == 1) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -492,7 +518,7 @@ class Cpu {
         fetch()
         regA = regA xor fetched
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 1
     }
 
@@ -502,7 +528,7 @@ class Cpu {
         temp = fetched + 1
         writeByte(addrAbs, temp and 0x00FF)
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         return 0
     }
 
@@ -510,7 +536,7 @@ class Cpu {
     private fun opINX():Int{
         regX++
         flagZ = if(regX == 0x00) 1 else 0
-        flagN = if((regX and 0x80) == 1) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -518,7 +544,7 @@ class Cpu {
     private fun opINY():Int{
         regY++
         flagZ = if(regY == 0x00) 1 else 0
-        flagN = if((regY and 0x80) == 1) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -542,7 +568,7 @@ class Cpu {
         fetch()
         regA = fetched
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 1
     }
 
@@ -551,7 +577,7 @@ class Cpu {
         fetch()
         regX = fetched
         flagZ = if(regX == 0x00) 1 else 0
-        flagN = if((regX and 0x80) == 1) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
         return 1
     }
 
@@ -560,17 +586,17 @@ class Cpu {
         fetch()
         regY = fetched
         flagZ = if(regY == 0x00) 1 else 0
-        flagN = if((regY and 0x80) == 1) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
         return 1
     }
 
     // Logical Shift Right
     private fun opLSR():Int{
         fetch()
-        flagC = if((fetched and 0x0001) == 1) 1 else 0
+        flagC = if((fetched and 0x0001) > 0) 1 else 0
         temp = fetched ushr 1
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
             regA = temp and 0x00FF
         } else {
@@ -592,7 +618,7 @@ class Cpu {
         fetch()
         regA = regA or fetched
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 1
     }
 
@@ -614,7 +640,7 @@ class Cpu {
     private fun opPLA():Int{
         regA = popStack()
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -629,9 +655,9 @@ class Cpu {
     private fun opROL():Int{
         fetch()
         temp = (fetched shl 1) or flagC
-        flagC = if((temp and 0xFF00) == 1) 1 else 0
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x0000) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
             regA = temp and 0x00FF
         } else{
@@ -644,9 +670,9 @@ class Cpu {
     private fun opROR():Int{
         fetch()
         temp = (flagC shl 7) or (fetched ushr 1)
-        flagC = if((fetched and 0x01) == 1) 1 else 0
+        flagC = if((fetched and 0x01) > 0) 1 else 0
         flagZ = if((temp and 0x00FF) == 0x00) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         if(getAddrModeByOpcode(opcode) == AddrMode.IMP){
             regA = temp and 0x00FF
         } else{
@@ -676,10 +702,10 @@ class Cpu {
         fetch()
         val value = fetched xor 0x00FF
         temp = regA + value + flagC
-        flagC = if((temp and 0xFF00) == 1) 1 else 0
+        flagC = if((temp and 0xFF00) > 0) 1 else 0
         flagZ = if((temp and 0x00FF) == 0) 1 else 0
-        flagV = if(((temp xor regA) and (temp xor value) and 0x0080) == 1) 1 else 0
-        flagN = if((temp and 0x0080) == 1) 1 else 0
+        flagV = if(((temp xor regA) and (temp xor value) and 0x0080) > 0) 1 else 0
+        flagN = if((temp and 0x0080) > 0) 1 else 0
         regA = temp and 0x00FF
         return 1
     }
@@ -724,7 +750,7 @@ class Cpu {
     private fun opTAX():Int{
         regX = regA
         flagZ = if(regX == 0x00) 1 else 0
-        flagN = if((regX and 0x80) == 1) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -732,7 +758,7 @@ class Cpu {
     private fun opTAY():Int{
         regY = regA
         flagZ = if(regY == 0x00) 1 else 0
-        flagN = if((regY and 0x80) == 1) 1 else 0
+        flagN = if((regY and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -740,7 +766,7 @@ class Cpu {
     private fun opTSX():Int{
         regX = regSP
         flagZ = if(regX == 0x00) 1 else 0
-        flagN = if((regX and 0x80) == 1) 1 else 0
+        flagN = if((regX and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -748,7 +774,7 @@ class Cpu {
     private fun opTXA():Int{
         regA = regX
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -762,7 +788,7 @@ class Cpu {
     private fun opTYA():Int{
         regA = regY
         flagZ = if(regA == 0x00) 1 else 0
-        flagN = if((regA and 0x80) == 1) 1 else 0
+        flagN = if((regA and 0x80) > 0) 1 else 0
         return 0
     }
 
@@ -771,8 +797,6 @@ class Cpu {
         return 0
         //throw cpuError("Illegal opcode encountered")
     }
-
-
 
     /****************************************** Addressing Modes *********************************************/
     private fun addressingModeHandler(mode: AddrMode): Int{
@@ -811,7 +835,6 @@ class Cpu {
         regPC++
         val hi = readByte(regPC)
         regPC++
-
         addrAbs = (hi shl 8) or lo
         addrAbs += regX
         return if((addrAbs and 0xFF00) != (hi shl 8)) 1 else 0 // page boundary
@@ -865,7 +888,7 @@ class Cpu {
     private fun addrREL(): Int{
         addrRel = readByte(regPC)
         regPC++
-        if((addrRel and 0x80) == 1){
+        if((addrRel and 0x80) > 0){
             addrRel = addrRel or 0xFF00
         }
         return 0
@@ -887,7 +910,6 @@ class Cpu {
         val hi = readByte(regPC)
         regPC++
         val addr = (hi shl 8) or lo
-
         addrAbs = if(lo == 0x00FF){  // Simulate page boundary bug
             (readByte(addr and 0xFF00) shl 8) or readByte(addr)
         } else {
@@ -941,6 +963,18 @@ class Cpu {
         return "%02X    %s    %02X    %02X    %02X    %04X    %02X    ".format(
                 opcode, getInstructionByOpcode(opcode).mnemonic, regA, regX, regY, regPC, regSP) +
                 " ${getStatus().toString(2).padStart(8,'0')}"
+    }
+
+    fun showPage(page: Int = 0): String {
+        var out = ""
+        for(i in 0..15) {
+            var line = "$%04X:  ".format((i * 16) + page)
+            for (j in 0..15) {
+                line += "%02X ".format(memory[((i * 16) + j) + page])
+            }
+            out += line + "\n"
+        }
+        return out
     }
 
     fun peek(addr: Int) = memory[addr] // Read memory with no cycle
